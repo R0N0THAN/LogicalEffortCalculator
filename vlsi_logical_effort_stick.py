@@ -5,7 +5,6 @@ import math
 import copy
 import heapq
 
-# Import Stick Diagram Renderer module
 from stick_renderer import StickDiagramWindow
 
 
@@ -96,9 +95,9 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         elif gtype == 'NAND':
             return (n_in + 2) / 3.0, float(n_in), float(n_in + 2), 2.0, float(n_in)
         elif gtype == 'NOR':
-            return (2 * n_in + 1) / 3.0, float(n_in), float(2 * n_in + 1), float(2 * n_in), 1.0
+            return (2 * n_in + 1) / 3.0, float(n_in), float(2 * n_in + 1), float(n_in), 1.0
         elif gtype in ('XOR', 'XNOR'):
-            return 2.0, 4.0, 4.0, 2.0, 2.0
+            return 2.0, float(n_in), 6.0, 4.0, 2.0
         return 1.0, 1.0, 3.0, 2.0, 1.0
 
     def get_pin_cin(node_id, gate_cin):
@@ -107,8 +106,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
             return float(node.get('cl', 120.0))
         elif node['type'] == 'INPUT':
             return gate_cin
-        n_in = max(1, node.get('inputs', 1))
-        return gate_cin / float(n_in)
+        return gate_cin
 
     start_nodes = input_nodes if input_nodes else [n for n in logic_nodes if not in_edges[n['id']]]
     if not start_nodes and logic_nodes:
@@ -141,18 +139,21 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         if node['type'] not in ('INPUT', 'OUTPUT'):
             current_cin[nid] = float(node['size'])
 
-    # TOPOLOGICAL BRANCHING EFFORT
+    # Branching effort is the total successor logical effort normalized by
+    # the logical effort of the successor on the selected path.
     def compute_topological_stage_branching(nid, next_on_path_id):
-        succ_connections = out_edges[nid]
-        if not succ_connections:
+        succ_ids = {sid for sid, _ in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT'}
+        if not succ_ids or next_on_path_id not in succ_ids:
             return 1.0
-        
-        total_pins = len(succ_connections)
-        on_path_pins = len([sid for sid, _ in succ_connections if sid == next_on_path_id])
 
-        if on_path_pins > 0:
-            return total_pins / float(on_path_pins)
-        return float(total_pins)
+        total_g = sum(
+            get_gate_info(nodes[sid]['type'], nodes[sid]['inputs'])[0]
+            for sid in succ_ids
+        )
+        on_path_g = get_gate_info(
+            nodes[next_on_path_id]['type'], nodes[next_on_path_id]['inputs']
+        )[0]
+        return total_g / on_path_g if on_path_g > 0 else 1.0
 
     def format_path_string(path_ids):
         formatted = []
@@ -268,7 +269,12 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N = target_eval['N']
     c_load = target_eval['c_load']
 
-    # Reverse Topological Ordering for Sizing
+    direct_input_gate_ids = {
+        nid for nid in nodes
+        if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')
+        and any(nodes[pid]['type'] == 'INPUT' for pid, _ in in_edges[nid])
+    }
+
     in_degree = {nid: len(in_edges[nid]) for nid in nodes}
     queue = [nid for nid, deg in in_degree.items() if deg == 0]
     topo_order = []
@@ -289,83 +295,61 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     max_iters = 50
     converged = False
     iters_run = 0
-    ideal_D = 0.0
+    G, B, H, F, P = (target_eval[key] for key in ('G', 'B', 'H', 'F', 'P'))
+    f_hat_target = F ** (1.0 / N) if N > 0 else 0.0
+    ideal_D = target_eval['D_ideal']
+    fixed_input_cin = {nid: current_cin[nid] for nid in direct_input_gate_ids}
+
+    def get_gate_output_cap(nid, cin_values):
+        output_cap = 0.0
+        for sid, _ in out_edges[nid]:
+            if nodes[sid]['type'] == 'OUTPUT':
+                output_cap += float(nodes[sid].get('cl', 120.0))
+            else:
+                output_cap += get_pin_cin(sid, cin_values.get(sid, current_cin[sid]))
+        return output_cap if output_cap > 0 else c_load
+
+    def get_path_stage_efforts(cin_values):
+        stage_efforts = []
+        for nid in critical_logic_path:
+            g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+            input_cap = get_pin_cin(nid, cin_values[nid])
+            output_cap = get_gate_output_cap(nid, cin_values)
+            stage_efforts.append(g * output_cap / input_cap if input_cap > 0 else 0.0)
+        return stage_efforts
 
     for iteration in range(1, max_iters + 1):
         iters_run = iteration
-
-        G, P = 1.0, 0.0
-        for nid in critical_logic_path:
-            g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-            G *= g
-            P += p_val
-
-        B = 1.0
-        for idx, nid in enumerate(critical_logic_path):
-            if idx + 1 < len(critical_logic_path):
-                next_on_path_id = critical_logic_path[idx + 1]
-                b_i = compute_topological_stage_branching(nid, next_on_path_id)
-            else:
-                b_i = 1.0
-            B *= b_i
-
-        first_gate_id = critical_logic_path[0]
-        c_in_first_pin = get_pin_cin(first_gate_id, current_cin[first_gate_id])
-        H = c_load / c_in_first_pin if c_in_first_pin > 0 else 1.0
-
-        F = G * B * H
-        f_hat_target = F ** (1.0 / N) if N > 0 else 0
-
-        if iteration == 1:
-            ideal_D = N * f_hat_target + P
-
         new_cin = {}
+        stage_f_hat = {stage_map[nid]: f_hat_target for nid in critical_logic_path}
         for nid in rev_topo_logic_nodes:
             node = nodes[nid]
             g, _, u_cin, _, _ = get_gate_info(node['type'], node['inputs'])
-            n_in = max(1, node.get('inputs', 1))
 
-            if node.get('locked', False) or (nid == critical_logic_path[0]):
-                new_cin[nid] = current_cin[nid]
+            if nid in direct_input_gate_ids:
+                new_cin[nid] = fixed_input_cin[nid]
             else:
-                succs = out_edges[nid]
-                cout = 0.0
-                for sid, pin_idx in succs:
-                    if nodes[sid]['type'] == 'OUTPUT':
-                        cout += float(nodes[sid].get('cl', 120.0))
-                    else:
-                        target_cin = new_cin[sid] if sid in new_cin else (current_cin[sid] if sid in current_cin else c_load)
-                        cout += get_pin_cin(sid, target_cin)
-
-                if cout == 0.0:
-                    cout = c_load
-
-                raw_cpin = (g * cout) / f_hat_target if f_hat_target > 0 else get_pin_cin(nid, current_cin[nid])
-                raw_gate_cin = raw_cpin * float(n_in)
-                
+                output_cap = get_gate_output_cap(nid, new_cin)
+                gate_f_hat = stage_f_hat.get(stage_map.get(nid), f_hat_target)
+                raw_gate_cin = (g * output_cap / gate_f_hat) if gate_f_hat > 0 else current_cin[nid]
                 x = max(1, round(raw_gate_cin / u_cin))
                 new_cin[nid] = float(x * u_cin)
 
-        if new_cin == current_cin:
+        stage_efforts = get_path_stage_efforts(new_cin)
+        rounded_F = math.prod(stage_efforts)
+        new_f_hat = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
+        ideal_D = N * new_f_hat + P
+        current_cin = new_cin
+
+        if math.isclose(new_f_hat, f_hat_target, rel_tol=1e-6, abs_tol=1e-6):
             converged = True
             break
-        current_cin = dict(new_cin)
+        f_hat_target = new_f_hat
 
-    final_stage_f = []
-    for idx, nid in enumerate(critical_logic_path):
-        g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-        c_pin_curr = get_pin_cin(nid, current_cin[nid])
-        
-        if idx == N - 1:
-            c_out_actual = c_load
-        else:
-            succs = out_edges[nid]
-            c_out_actual = sum(get_pin_cin(sid, current_cin[sid]) for sid, _ in succs if sid in current_cin)
-        
-        h_actual = c_out_actual / c_pin_curr if c_pin_curr > 0 else 0
-        f_actual = g * h_actual
-        final_stage_f.append(f_actual)
-
+    final_stage_f = get_path_stage_efforts(current_cin)
+    rounded_F = math.prod(final_stage_f)
+    f_hat_rounded = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
+    ideal_D = N * f_hat_rounded + P
     actual_D = sum(final_stage_f) + P
 
     p_avg = P / N if N > 0 else 1.0
@@ -383,7 +367,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         return max(1.001, f_val)
 
     f_hat_opt = solve_optimal_f_hat(p_avg)
-    N_opt = math.log(F) / math.log(f_hat_opt) if (F > 0 and f_hat_opt > 1.0) else N
+    N_opt = math.log(rounded_F) / math.log(f_hat_opt) if (rounded_F > 0 and f_hat_opt > 1.0) else N
     N_opt_int = round(N_opt)
 
     summary = {
@@ -416,10 +400,12 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append("\n4. Final Path Efforts & Branching:")
     lines.append(f"   Path Logical Effort G   = {G:.3f}")
     lines.append(f"   Path Branching Effort B = {B:.3f}")
-    lines.append(f"   Path Electrical Effort H = {c_load:.1f}C / {c_in_first_pin:.1f}C = {H:.3f}")
-    lines.append(f"   Total Path Effort F     = G * B * H = {F:.3f}")
+    lines.append(f"   Path Electrical Effort H = {H:.3f}")
+    lines.append(f"   Initial Path Effort F   = G * B * H = {F:.3f}")
 
     lines.append("\n5. Path Delays:")
+    lines.append(f"   Rounded Path Effort F   = {rounded_F:.3f}")
+    lines.append(f"   Rounded f_hat           = {f_hat_rounded:.3f}")
     lines.append(f"   IDEAL PATH DELAY D_ideal = {ideal_D:.3f} tau")
     for idx, nid in enumerate(critical_logic_path):
         lines.append(f"   Stage {stage_map.get(nid, '?')} Effort (f_{idx+1}) = {final_stage_f[idx]:.3f}")
@@ -434,7 +420,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     for nid in all_logic_ids:
         node = nodes[nid]
         c_val = current_cin.get(nid, float(node['size']))
-        lock_str = " [LOCKED]" if node.get('locked', False) else ""
+        lock_str = " [INPUT-DRIVEN, FIXED]" if nid in direct_input_gate_ids else ""
         stg = stage_map.get(nid, '?')
         lines.append(f"   Stage {stg} | Gate #{nid} [{node.get('name', node['type'])}]: Cin = {c_val:.1f} C{lock_str}")
 
@@ -549,8 +535,6 @@ class TransistorSchematicWindow(tk.Toplevel):
                   font=("Arial", 12, "bold")).pack(pady=10)
 
         info_str = f"Gate Type: {gtype} | Inputs: {n_in} | Stage: {stage_num if stage_num is not None else 'N/A'} | Rounded Cin = {cin_val:.1f} C"
-        if node.get('locked', False):
-            info_str += " [LOCKED]"
         if gtype in ('XOR', 'XNOR'):
             info_str += " [SEPARATED INVERTERS MODEL]"
 
@@ -590,7 +574,7 @@ class TransistorSchematicWindow(tk.Toplevel):
         n_in = self.node['inputs']
         cin_val = self.node['size']
 
-        u_cin = 3.0 if gtype == 'INV' else (n_in + 2.0 if gtype == 'NAND' else (2.0 * n_in + 1.0 if gtype == 'NOR' else 4.0))
+        u_cin = 3.0 if gtype == 'INV' else (n_in + 2.0 if gtype == 'NAND' else (2.0 * n_in + 1.0 if gtype == 'NOR' else 6.0))
         x_scale = max(1, round(cin_val / u_cin))
 
         c.create_line(50, 40, 780, 40, fill="#f9e2af", width=4)
@@ -614,7 +598,7 @@ class TransistorSchematicWindow(tk.Toplevel):
             c.create_text(180, 280, text="IN A", fill="#cdd6f4", font=("Arial", 10, "bold"))
 
         elif gtype in ('XOR', 'XNOR'):
-            w_core_p, w_core_n = 2.0 * x_scale, 2.0 * x_scale
+            w_core_p, w_core_n = 4.0 * x_scale, 2.0 * x_scale
             c.create_rectangle(380, 80, 680, 480, outline="#a6e3a1", width=2, dash=(4, 4))
             c.create_text(530, 65, text=f"CORE {gtype} LOGIC BLOCK", fill="#a6e3a1", font=("Arial", 9, "bold"))
 
@@ -801,10 +785,10 @@ class SchematicCanvas(tk.Canvas):
         elif gtype == 'NOR':
             return float(2 * inputs + 1)
         elif gtype in ('XOR', 'XNOR'):
-            return 4.0
+            return 6.0
         return 3.0
 
-    def add_node(self, gtype, x=100, y=100, inputs=3, size=None, cl=120.0, locked=False, name=None):
+    def add_node(self, gtype, x=100, y=100, inputs=3, size=None, cl=120.0, name=None):
         self.push_undo()
 
         if gtype in ('XOR', 'XNOR'):
@@ -846,7 +830,6 @@ class SchematicCanvas(tk.Canvas):
             'inputs': inputs,
             'size': float(size),
             'cl': float(cl),
-            'locked': locked,
             'separate_inv': True
         }
         self.selected_node_id = node_id
@@ -1220,8 +1203,7 @@ class SchematicCanvas(tk.Canvas):
                 self.create_text(x, y, text=lbl_str, fill="#11111b", font=("Arial", max(7, int(8 * self.zoom)), "bold"), tags="schematic")
 
             if gtype not in ('INPUT', 'OUTPUT'):
-                lock_str = " 🔒" if node.get('locked', False) else ""
-                lbl = f"[Stage {stg}] {name} (Cin={node['size']:.1f}C){lock_str}"
+                lbl = f"[Stage {stg}] {name} (Cin={node['size']:.1f}C)"
                 self.create_text(x, y - max(30*self.zoom, node['inputs']*10*self.zoom), text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
 
             in_pins, out_pins = self.get_pin_positions(node)
@@ -1531,18 +1513,15 @@ class VLSIWorkbenchApp(tk.Tk):
             size_var.trace_add("write", on_size_change)
             size_spin = ttk.Spinbox(self.prop_frame, from_=0.1, to=1000.0, increment=1.0, textvariable=size_var)
             size_spin.pack(fill=tk.X)
+            input_driven = any(
+                wire['to_id'] == node['id']
+                and self.canvas.nodes.get(wire['from_id'], {}).get('type') == 'INPUT'
+                for wire in self.canvas.wires
+            )
+            if input_driven:
+                size_spin.configure(state=tk.DISABLED)
             size_spin.bind("<FocusIn>", lambda e: self.canvas.push_undo())
             size_spin.bind("<Return>", lambda e: self.focus())
-
-            locked_var = tk.BooleanVar(value=node.get('locked', False))
-
-            def update_lock():
-                self.canvas.push_undo()
-                node['locked'] = locked_var.get()
-                self.canvas.render()
-
-            lock_chk = ttk.Checkbutton(self.prop_frame, text="🔒 Lock Input Cap S", variable=locked_var, command=update_lock)
-            lock_chk.pack(anchor=tk.W, pady=6)
 
             if node['type'] in ('XOR', 'XNOR'):
                 ttk.Label(
@@ -1607,6 +1586,8 @@ class VLSIWorkbenchApp(tk.Tk):
                 data = json.load(f)
 
             self.canvas.nodes = {n['id']: n for n in data.get("nodes", [])}
+            for node in self.canvas.nodes.values():
+                node.pop('locked', None)
             self.canvas.wires = data.get("wires", [])
             max_id = max([n['id'] for n in self.canvas.nodes.values()], default=0)
             self.canvas.next_node_id = max_id + 1
@@ -1655,8 +1636,7 @@ class VLSIWorkbenchApp(tk.Tk):
             for nid, new_cin in cin_dict.items():
                 if nid in self.canvas.nodes:
                     node = self.canvas.nodes[nid]
-                    if not node.get('locked', False):
-                        node['size'] = float(round(new_cin, 1))
+                    node['size'] = float(round(new_cin, 1))
 
             self.canvas.render()
             if self.canvas.selected_node_id:

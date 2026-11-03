@@ -6,6 +6,45 @@ import copy
 import heapq
 
 # =====================================================================
+# STAGE NUMBER COMPUTATION HELPER (Logic Gates Only)
+# =====================================================================
+def compute_stage_numbers(nodes, wires):
+    in_edges = {nid: [] for nid in nodes}
+    for w in wires:
+        if w['to_id'] in in_edges:
+            in_edges[w['to_id']].append(w['from_id'])
+
+    stage = {}
+    for nid, n in nodes.items():
+        if n['type'] == 'INPUT':
+            stage[nid] = 0
+
+    changed = True
+    iterations = 0
+    while changed and iterations < 100:
+        iterations += 1
+        changed = False
+        for nid, n in nodes.items():
+            # OUTPUT pins and INPUT pins are not logic stages
+            if n['type'] in ('INPUT', 'OUTPUT'):
+                continue
+            preds = in_edges[nid]
+            if preds and all(p in stage for p in preds):
+                max_pred_stage = max(stage[p] for p in preds)
+                new_stage = max_pred_stage + 1
+                if stage.get(nid) != new_stage:
+                    stage[nid] = new_stage
+                    changed = True
+
+    # Assign default Stage 1 for any uncalculated or disconnected logic gates
+    for nid, n in nodes.items():
+        if n['type'] not in ('INPUT', 'OUTPUT') and nid not in stage:
+            stage[nid] = 1
+
+    return stage
+
+
+# =====================================================================
 # PATH SIMPLIFICATION HELPER (Merges Collinear Grid Points)
 # =====================================================================
 def simplify_path(path):
@@ -24,13 +63,14 @@ def simplify_path(path):
     simplified.append(path[-1])
     return simplified
 
-
 # =====================================================================
-# ITERATIVE LOGICAL EFFORT CALCULATION ENGINE
+# ITERATIVE LOGICAL EFFORT CALCULATION ENGINE (Topological Pin Sizing)
 # =====================================================================
 def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_path=None):
     nodes = {n['id']: n for n in graph_data['nodes']}
     wires = graph_data['wires']
+
+    stage_map = compute_stage_numbers(nodes, wires)
 
     logic_nodes = [n for n in graph_data['nodes'] if n['type'] not in ('INPUT', 'OUTPUT')]
     output_nodes = [n for n in graph_data['nodes'] if n['type'] == 'OUTPUT']
@@ -40,26 +80,31 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     if not logic_nodes:
         return empty_summary, "No logic gates found in schematic.", {}, ["[Auto: No paths found]"]
 
-    # Adjacency graph setup
     out_edges = {n['id']: [] for n in graph_data['nodes']}
     in_edges = {n['id']: [] for n in graph_data['nodes']}
     for w in wires:
-        out_edges[w['from_id']].append(w['to_id'])
-        in_edges[w['to_id']].append(w['from_id'])
+        out_edges[w['from_id']].append((w['to_id'], w['to_pin']))
+        in_edges[w['to_id']].append((w['from_id'], w['to_pin']))
 
-    # Helper: returns (g, p, Unit_Cin, Unit_PMOS_width, Unit_NMOS_width)
     def get_gate_info(gtype, n_in):
         if gtype == 'INV':
             return 1.0, 1.0, 3.0, 2.0, 1.0
         elif gtype == 'NAND':
             return (n_in + 2) / 3.0, float(n_in), float(n_in + 2), 2.0, float(n_in)
         elif gtype == 'NOR':
-            return (2 * n_in + 1) / 3.0, float(n_in), float(2 * n_in + 1), float(2 * n_in), 1.0
+            return (2 * n_in + 1) / 3.0, float(n_in), float(2 * n_in + 1), float(n_in), 1.0
         elif gtype in ('XOR', 'XNOR'):
-            return 4.0, 4.0, 9.0, 4.0, 2.0
+            return 2.0, float(n_in), 6.0, 4.0, 2.0
         return 1.0, 1.0, 3.0, 2.0, 1.0
 
-    # Identify path start and end points
+    def get_pin_cin(node_id, gate_cin):
+        node = nodes[node_id]
+        if node['type'] == 'OUTPUT':
+            return float(node.get('cl', 120.0))
+        elif node['type'] == 'INPUT':
+            return gate_cin
+        return gate_cin
+
     start_nodes = input_nodes if input_nodes else [n for n in logic_nodes if not in_edges[n['id']]]
     if not start_nodes and logic_nodes:
         start_nodes = [logic_nodes[0]]
@@ -68,15 +113,14 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     if not end_nodes and logic_nodes:
         end_nodes = [logic_nodes[-1]]
 
-    # Path traversal with loop protection
     def find_paths(curr_id, end_id, path):
         path = path + [curr_id]
         if curr_id == end_id:
             return [path]
         paths = []
-        for nxt in out_edges[curr_id]:
-            if nxt not in path:
-                paths.extend(find_paths(nxt, end_id, path))
+        for nxt_id, _ in out_edges[curr_id]:
+            if nxt_id not in path:
+                paths.extend(find_paths(nxt_id, end_id, path))
         return paths
 
     all_raw_paths = []
@@ -92,7 +136,34 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         if node['type'] not in ('INPUT', 'OUTPUT'):
             current_cin[nid] = float(node['size'])
 
-    # Evaluate Pre-sizing Delays Across ALL Paths
+    # Branching effort is the total successor logical effort normalized by
+    # the logical effort of the successor on the selected path.
+    def compute_topological_stage_branching(nid, next_on_path_id):
+        succ_ids = {sid for sid, _ in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT'}
+        if not succ_ids or next_on_path_id not in succ_ids:
+            return 1.0
+
+        total_g = sum(
+            get_gate_info(nodes[sid]['type'], nodes[sid]['inputs'])[0]
+            for sid in succ_ids
+        )
+        on_path_g = get_gate_info(
+            nodes[next_on_path_id]['type'], nodes[next_on_path_id]['inputs']
+        )[0]
+        return total_g / on_path_g if on_path_g > 0 else 1.0
+
+    def format_path_string(path_ids):
+        formatted = []
+        for nid in path_ids:
+            n = nodes[nid]
+            if n['type'] == 'INPUT':
+                formatted.append(f"{n.get('name', 'IN')}")
+            elif n['type'] == 'OUTPUT':
+                formatted.append(f"{n.get('name', 'OUT')} ({n.get('cl', 120)}C)")
+            else:
+                formatted.append(f"{n.get('name', n['type'])}[S{stage_map.get(nid, '?')}]")
+        return " -> ".join(formatted)
+
     evaluated_paths = []
     for p in all_raw_paths:
         logic_p = [nid for nid in p if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')]
@@ -103,8 +174,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         end_node = nodes[p[-1]]
         c_load_p = float(end_node['cl']) if end_node['type'] == 'OUTPUT' else 120.0
 
-        G_p = 1.0
-        P_p = 0.0
+        G_p, P_p = 1.0, 0.0
         for nid in logic_p:
             g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
             G_p *= g
@@ -112,43 +182,33 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
         B_p = 1.0
         for idx, nid in enumerate(logic_p):
-            succs = [sid for sid in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT']
-            if len(succs) > 1 and idx + 1 < len(logic_p):
+            if idx + 1 < len(logic_p):
                 next_on_path_id = logic_p[idx + 1]
-                total_driven = sum(current_cin[sid] for sid in succs if sid in current_cin)
-                on_path_driven = current_cin[next_on_path_id]
-                b_i = total_driven / on_path_driven if on_path_driven > 0 else 1.0
+                b_i = compute_topological_stage_branching(nid, next_on_path_id)
             else:
                 b_i = 1.0
             B_p *= b_i
 
-        c_in_first = current_cin[logic_p[0]] if logic_p else 1.0
-        H_p = c_load_p / c_in_first if c_in_first > 0 else 1.0
+        c_in_first_pin = get_pin_cin(logic_p[0], current_cin[logic_p[0]]) if logic_p else 1.0
+        H_p = c_load_p / c_in_first_pin if c_in_first_pin > 0 else 1.0
         F_p = G_p * B_p * H_p
         f_hat_p = F_p ** (1.0 / N_p) if N_p > 0 else 0
         D_ideal_p = N_p * f_hat_p + P_p if N_p > 0 else 0.0
 
-        path_names = [f"{nodes[nid].get('name', nodes[nid]['type'])}" for nid in p]
-        path_str = " -> ".join(path_names)
+        path_str = format_path_string(p)
 
         evaluated_paths.append({
-            'full_path': p,
-            'logic_path': logic_p,
-            'path_str': path_str,
-            'D_ideal': D_ideal_p,
-            'F': F_p, 'G': G_p, 'B': B_p, 'H': H_p, 'P': P_p, 'N': N_p,
+            'full_path': p, 'logic_path': logic_p, 'path_str': path_str,
+            'D_ideal': D_ideal_p, 'F': F_p, 'G': G_p, 'B': B_p, 'H': H_p, 'P': P_p, 'N': N_p,
             'c_load': c_load_p
         })
 
-    # Sort paths by pre-sizing worst delay (highest D_ideal first)
     evaluated_paths.sort(key=lambda x: x['D_ideal'], reverse=True)
 
-    # Format options for path selection dropdown
     path_options = ["[Auto: Worst Delay] " + evaluated_paths[0]['path_str'] + f" ({evaluated_paths[0]['D_ideal']:.2f}τ)"]
     for idx, ep in enumerate(evaluated_paths):
         path_options.append(f"Path {idx+1}: {ep['path_str']} (D = {ep['D_ideal']:.2f}τ)")
 
-    # Handle Custom Graphical Path Selection
     if custom_graphical_path:
         matched_ep = next((ep for ep in evaluated_paths if ep['full_path'] == custom_graphical_path), None)
         if matched_ep:
@@ -157,7 +217,6 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
             custom_option_str = f"[Graphical Custom] {target_eval['path_str']} (D = {target_eval['D_ideal']:.2f}τ)"
             path_options.insert(1, custom_option_str)
         else:
-            # Build evaluation for non-standard custom path
             p = custom_graphical_path
             logic_p = [nid for nid in p if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')]
             N_p = len(logic_p)
@@ -172,24 +231,20 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
             B_p = 1.0
             for idx, nid in enumerate(logic_p):
-                succs = [sid for sid in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT']
-                if len(succs) > 1 and idx + 1 < len(logic_p):
+                if idx + 1 < len(logic_p):
                     next_on_path_id = logic_p[idx + 1]
-                    total_driven = sum(current_cin[sid] for sid in succs if sid in current_cin)
-                    on_path_driven = current_cin[next_on_path_id]
-                    b_i = total_driven / on_path_driven if on_path_driven > 0 else 1.0
+                    b_i = compute_topological_stage_branching(nid, next_on_path_id)
                 else:
                     b_i = 1.0
                 B_p *= b_i
 
-            c_in_first = current_cin[logic_p[0]] if logic_p else 1.0
-            H_p = c_load_p / c_in_first if c_in_first > 0 else 1.0
+            c_in_first_pin = get_pin_cin(logic_p[0], current_cin[logic_p[0]]) if logic_p else 1.0
+            H_p = c_load_p / c_in_first_pin if c_in_first_pin > 0 else 1.0
             F_p = G_p * B_p * H_p
             f_hat_p = F_p ** (1.0 / N_p) if N_p > 0 else 0
             D_ideal_p = N_p * f_hat_p + P_p if N_p > 0 else 0.0
 
-            path_names = [f"{nodes[nid].get('name', nodes[nid]['type'])}" for nid in p]
-            path_str = " -> ".join(path_names)
+            path_str = format_path_string(p)
 
             target_eval = {
                 'full_path': p, 'logic_path': logic_p, 'path_str': path_str,
@@ -211,88 +266,87 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N = target_eval['N']
     c_load = target_eval['c_load']
 
-    # Iterative Sizing Loop for Chosen Path
+    direct_input_gate_ids = {
+        nid for nid in nodes
+        if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')
+        and any(nodes[pid]['type'] == 'INPUT' for pid, _ in in_edges[nid])
+    }
+
+    in_degree = {nid: len(in_edges[nid]) for nid in nodes}
+    queue = [nid for nid, deg in in_degree.items() if deg == 0]
+    topo_order = []
+    while queue:
+        curr = queue.pop(0)
+        topo_order.append(curr)
+        for nxt, _ in out_edges[curr]:
+            in_degree[nxt] -= 1
+            if in_degree[nxt] == 0:
+                queue.append(nxt)
+
+    for nid in nodes:
+        if nid not in topo_order:
+            topo_order.append(nid)
+
+    rev_topo_logic_nodes = [nid for nid in reversed(topo_order) if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')]
+
     max_iters = 50
     converged = False
     iters_run = 0
-    ideal_D = 0.0
+    G, B, H, F, P = (target_eval[key] for key in ('G', 'B', 'H', 'F', 'P'))
+    f_hat_target = F ** (1.0 / N) if N > 0 else 0.0
+    ideal_D = target_eval['D_ideal']
+    fixed_input_cin = {nid: current_cin[nid] for nid in direct_input_gate_ids}
+
+    def get_gate_output_cap(nid, cin_values):
+        output_cap = 0.0
+        for sid, _ in out_edges[nid]:
+            if nodes[sid]['type'] == 'OUTPUT':
+                output_cap += float(nodes[sid].get('cl', 120.0))
+            else:
+                output_cap += get_pin_cin(sid, cin_values.get(sid, current_cin[sid]))
+        return output_cap if output_cap > 0 else c_load
+
+    def get_path_stage_efforts(cin_values):
+        stage_efforts = []
+        for nid in critical_logic_path:
+            g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+            input_cap = get_pin_cin(nid, cin_values[nid])
+            output_cap = get_gate_output_cap(nid, cin_values)
+            stage_efforts.append(g * output_cap / input_cap if input_cap > 0 else 0.0)
+        return stage_efforts
 
     for iteration in range(1, max_iters + 1):
         iters_run = iteration
-
-        G = 1.0
-        P = 0.0
-        for nid in critical_logic_path:
-            g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-            G *= g
-            P += p_val
-
-        B = 1.0
-        for idx, nid in enumerate(critical_logic_path):
-            succs = [sid for sid in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT']
-            if len(succs) > 1 and idx + 1 < len(critical_logic_path):
-                next_on_path_id = critical_logic_path[idx + 1]
-                total_driven = sum(current_cin[sid] for sid in succs if sid in current_cin)
-                on_path_driven = current_cin[next_on_path_id]
-                b_i = total_driven / on_path_driven if on_path_driven > 0 else 1.0
-            else:
-                b_i = 1.0
-            B *= b_i
-
-        first_gate_id = critical_logic_path[0]
-        c_in_first = current_cin[first_gate_id]
-        H = c_load / c_in_first if c_in_first > 0 else 1.0
-
-        F = G * B * H
-        f_hat_target = F ** (1.0 / N) if N > 0 else 0
-
-        if iteration == 1:
-            ideal_D = N * f_hat_target + P
-
         new_cin = {}
-        for idx in range(N - 1, -1, -1):
-            nid = critical_logic_path[idx]
+        stage_f_hat = {stage_map[nid]: f_hat_target for nid in critical_logic_path}
+        for nid in rev_topo_logic_nodes:
             node = nodes[nid]
             g, _, u_cin, _, _ = get_gate_info(node['type'], node['inputs'])
 
-            if idx == 0 or node.get('locked', False):
-                new_cin[nid] = current_cin[nid]
+            if nid in direct_input_gate_ids:
+                new_cin[nid] = fixed_input_cin[nid]
             else:
-                cout = c_load if idx == N - 1 else new_cin[critical_logic_path[idx + 1]]
-                raw_cin = (g * cout) / f_hat_target if f_hat_target > 0 else current_cin[nid]
-                x = max(1, round(raw_cin / u_cin))
+                output_cap = get_gate_output_cap(nid, new_cin)
+                gate_f_hat = stage_f_hat.get(stage_map.get(nid), f_hat_target)
+                raw_gate_cin = (g * output_cap / gate_f_hat) if gate_f_hat > 0 else current_cin[nid]
+                x = max(1, round(raw_gate_cin / u_cin))
                 new_cin[nid] = float(x * u_cin)
 
-        for nid, node in nodes.items():
-            if node['type'] not in ('INPUT', 'OUTPUT') and nid not in new_cin:
-                g, _, u_cin, _, _ = get_gate_info(node['type'], node['inputs'])
-                if node.get('locked', False):
-                    new_cin[nid] = current_cin[nid]
-                else:
-                    succs = [sid for sid in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT']
-                    cout = new_cin[succs[0]] if (succs and succs[0] in new_cin) else c_load
-                    raw_cin = (g * cout) / f_hat_target if f_hat_target > 0 else current_cin[nid]
-                    x = max(1, round(raw_cin / u_cin))
-                    new_cin[nid] = float(x * u_cin)
+        stage_efforts = get_path_stage_efforts(new_cin)
+        rounded_F = math.prod(stage_efforts)
+        new_f_hat = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
+        ideal_D = N * new_f_hat + P
+        current_cin = new_cin
 
-        if new_cin == current_cin:
+        if math.isclose(new_f_hat, f_hat_target, rel_tol=1e-6, abs_tol=1e-6):
             converged = True
             break
-        current_cin = dict(new_cin)
+        f_hat_target = new_f_hat
 
-    final_stage_f = []
-    for idx, nid in enumerate(critical_logic_path):
-        g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-        if idx == N - 1:
-            c_out_actual = c_load
-        else:
-            succs = [sid for sid in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT']
-            c_out_actual = sum(current_cin[sid] for sid in succs if sid in current_cin)
-        
-        h_actual = c_out_actual / current_cin[nid] if current_cin[nid] > 0 else 0
-        f_actual = g * h_actual
-        final_stage_f.append(f_actual)
-
+    final_stage_f = get_path_stage_efforts(current_cin)
+    rounded_F = math.prod(final_stage_f)
+    f_hat_rounded = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
+    ideal_D = N * f_hat_rounded + P
     actual_D = sum(final_stage_f) + P
 
     p_avg = P / N if N > 0 else 1.0
@@ -310,7 +364,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         return max(1.001, f_val)
 
     f_hat_opt = solve_optimal_f_hat(p_avg)
-    N_opt = math.log(F) / math.log(f_hat_opt) if (F > 0 and f_hat_opt > 1.0) else N
+    N_opt = math.log(rounded_F) / math.log(f_hat_opt) if (rounded_F > 0 and f_hat_opt > 1.0) else N
     N_opt_int = round(N_opt)
 
     summary = {
@@ -327,13 +381,13 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
     lines.append("\nALL DETECTED PATHS (Ranked by Pre-Sizing Delay):")
     for idx, ep in enumerate(evaluated_paths):
-        is_active = " [SELECTED]" if ep['full_path'] == critical_full_path else ""
+        is_active = " [SELECTED FOR SIZING]" if ep['full_path'] == critical_full_path else ""
         lines.append(f"  Path #{idx+1}: {ep['path_str']}")
         lines.append(f"          Est Delay D_ideal = {ep['D_ideal']:.3f} tau | Total Effort F = {ep['F']:.2f}{is_active}")
 
-    lines.append(f"\n--- EVALUATING SELECTED PATH ---")
+    lines.append(f"\n--- SIZING FOR SELECTED PATH ---")
     lines.append(f"1. Logic Stages (N): {N}")
-    path_names = [f"Gate #{nid} [{nodes[nid].get('name', nodes[nid]['type'])}]" for nid in critical_logic_path]
+    path_names = [f"Gate #{nid} [{nodes[nid].get('name', nodes[nid]['type'])}, Stage {stage_map.get(nid, '?')}]" for nid in critical_logic_path]
     lines.append(f"2. Logic Gates Path: {' -> '.join(path_names)}")
 
     lines.append(f"\n3. Convergence:")
@@ -343,53 +397,37 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append("\n4. Final Path Efforts & Branching:")
     lines.append(f"   Path Logical Effort G   = {G:.3f}")
     lines.append(f"   Path Branching Effort B = {B:.3f}")
-    lines.append(f"   Path Electrical Effort H = {c_load:.1f}C / {c_in_first:.1f}C = {H:.3f}")
-    lines.append(f"   Total Path Effort F     = G * B * H = {F:.3f}")
+    lines.append(f"   Path Electrical Effort H = {H:.3f}")
+    lines.append(f"   Initial Path Effort F   = G * B * H = {F:.3f}")
 
     lines.append("\n5. Path Delays:")
+    lines.append(f"   Rounded Path Effort F   = {rounded_F:.3f}")
+    lines.append(f"   Rounded f_hat           = {f_hat_rounded:.3f}")
     lines.append(f"   IDEAL PATH DELAY D_ideal = {ideal_D:.3f} tau")
     for idx, nid in enumerate(critical_logic_path):
-        lines.append(f"   Stage {idx+1} Effort (f_{idx+1}) = {final_stage_f[idx]:.3f}")
+        lines.append(f"   Stage {stage_map.get(nid, '?')} Effort (f_{idx+1}) = {final_stage_f[idx]:.3f}")
     lines.append(f"   Total Parasitic Delay P  = {P:.3f}")
     lines.append(f"   ACTUAL PATH DELAY D      = {actual_D:.3f} tau")
 
-    lines.append("\n6. Final Rounded Gate Input Capacitances (Cin):")
-    for nid in critical_logic_path + [n['id'] for n in logic_nodes if n['id'] not in critical_logic_path]:
+    lines.append("\n6. Final Transistor Widths & Rounded Input Capacitances (Cin):")
+    all_logic_ids = sorted(
+        critical_logic_path + [n['id'] for n in logic_nodes if n['id'] not in critical_logic_path],
+        key=lambda nid: (stage_map.get(nid, 0), nid)
+    )
+    for nid in all_logic_ids:
         node = nodes[nid]
         c_val = current_cin.get(nid, float(node['size']))
-        lock_str = " [LOCKED]" if node.get('locked', False) else ""
-        lines.append(f"   Gate #{nid} [{node.get('name', node['type'])}]: {c_val:.1f} C{lock_str}")
+        lock_str = " [INPUT-DRIVEN, FIXED]" if nid in direct_input_gate_ids else ""
+        stg = stage_map.get(nid, '?')
+        lines.append(f"   Stage {stg} | Gate #{nid} [{node.get('name', node['type'])}]: Cin = {c_val:.1f} C{lock_str}")
 
-    lines.append("\n7. Final Transistor Widths (PMOS:NMOS):")
-    for nid in critical_logic_path + [n['id'] for n in logic_nodes if n['id'] not in critical_logic_path]:
-        node = nodes[nid]
-        gtype = node['type']
-        nin = node['inputs']
-        _, _, u_cin, u_p, u_n = get_gate_info(gtype, nin)
-        cin = current_cin.get(nid, float(node['size']))
-        x = max(1, round(cin / u_cin))
-        
-        lines.append(f"   Gate #{nid} [{node.get('name', gtype)}]:")
-        lines.append(f"     Scale Factor x = {x}")
-        if gtype in ('XOR', 'XNOR'):
-            lines.append(f"     Inverter PMOS:NMOS = {2*x} : {1*x}")
-            lines.append(f"     Core     PMOS:NMOS = {4*x} : {2*x}")
-        else:
-            p_w, n_w = round(u_p * x), round(u_n * x)
-            lines.append(f"     PMOS:NMOS          = {p_w} : {n_w}")
-
-    lines.append("\n8. OPTIMAL STAGE COUNT TUNING (N_opt):")
-    lines.append(f"   dD/dN = p + F^(1/N) - F^(1/N)*ln(F^(1/N)) = 0")
+    lines.append("\n7. OPTIMAL STAGE COUNT TUNING (N_opt):")
     lines.append(f"   Avg Parasitic p_avg = {p_avg:.3f}")
     lines.append(f"   Optimal Stage Effort (f_hat_opt) = {f_hat_opt:.3f}")
     lines.append(f"   Calculated N_opt = log_(f_hat_opt)(F) = {N_opt:.2f} stages")
     lines.append(f"   RECOMMENDED N_opt = {N_opt_int} stages")
 
-    lines.append("\n9. OUTPUT TRUTH TABLE:")
-    lines.append(generate_truth_table(graph_data))
-
     return summary, "\n".join(lines), current_cin, path_options
-
 
 # =====================================================================
 # TRUTH TABLE GENERATOR
@@ -446,9 +484,15 @@ def generate_truth_table(graph_data):
                     elif gtype == 'NOR':
                         val = not any(in_vals)
                     elif gtype == 'XOR':
-                        val = (sum(in_vals) % 2) == 1
+                        if n_in == 4:
+                            val = (in_vals[0] and in_vals[3]) or (in_vals[1] and in_vals[2])
+                        else:
+                            val = (sum(in_vals) % 2) == 1
                     elif gtype == 'XNOR':
-                        val = (sum(in_vals) % 2) == 0
+                        if n_in == 4:
+                            val = (in_vals[0] and in_vals[2]) or (in_vals[1] and in_vals[3])
+                        else:
+                            val = (sum(in_vals) % 2) == 0
                     else:
                         val = False
 
@@ -471,24 +515,26 @@ def generate_truth_table(graph_data):
 # TRANSISTOR SCHEMATIC POPUP WINDOW
 # =====================================================================
 class TransistorSchematicWindow(tk.Toplevel):
-    def __init__(self, parent, node):
+    def __init__(self, parent, node, stage_num=None):
         super().__init__(parent)
         self.node = node
         gtype = node['type']
         n_in = node['inputs']
         cin_val = node['size']
         node_name = node.get('name', f"{gtype}{node['id']}")
+        stage_str = f" | Stage {stage_num}" if stage_num is not None else ""
         
         self.title(f"Transistor Schematic - Gate {node_name} ({gtype})")
-        self.geometry("820x650")
+        self.geometry("860x680")
         self.configure(bg="#11111b")
 
-        ttk.Label(self, text=f"CMOS Transistor Level Schematic for Gate {node_name}", 
+        ttk.Label(self, text=f"CMOS Transistor Level Schematic for Gate {node_name}{stage_str}", 
                   font=("Arial", 12, "bold")).pack(pady=10)
 
-        info_str = f"Gate Type: {gtype} | Inputs: {n_in} | Rounded Input Cap Cin = {cin_val:.1f} C"
-        if node.get('locked', False):
-            info_str += " [LOCKED]"
+        info_str = f"Gate Type: {gtype} | Inputs: {n_in} | Stage: {stage_num if stage_num is not None else 'N/A'} | Rounded Cin = {cin_val:.1f} C"
+        if gtype in ('XOR', 'XNOR'):
+            info_str += " [SEPARATED INVERTERS MODEL]"
+
         ttk.Label(self, text=info_str, font=("Arial", 10)).pack(pady=(0, 10))
 
         self.canvas = tk.Canvas(self, bg="#1e1e2e", highlightthickness=0)
@@ -525,13 +571,13 @@ class TransistorSchematicWindow(tk.Toplevel):
         n_in = self.node['inputs']
         cin_val = self.node['size']
 
-        u_cin = 3.0 if gtype == 'INV' else (n_in + 2.0 if gtype == 'NAND' else (2.0 * n_in + 1.0 if gtype == 'NOR' else 9.0))
+        u_cin = 3.0 if gtype == 'INV' else (n_in + 2.0 if gtype == 'NAND' else (2.0 * n_in + 1.0 if gtype == 'NOR' else 6.0))
         x_scale = max(1, round(cin_val / u_cin))
 
-        c.create_line(50, 40, 750, 40, fill="#f9e2af", width=4)
+        c.create_line(50, 40, 780, 40, fill="#f9e2af", width=4)
         c.create_text(70, 25, text="VDD", fill="#f9e2af", font=("Arial", 11, "bold"))
 
-        c.create_line(50, 520, 750, 520, fill="#a6adc8", width=4)
+        c.create_line(50, 520, 780, 520, fill="#a6adc8", width=4)
         c.create_text(70, 535, text="GND", fill="#a6adc8", font=("Arial", 11, "bold"))
 
         if gtype == 'INV':
@@ -548,148 +594,34 @@ class TransistorSchematicWindow(tk.Toplevel):
             c.create_line(315, 150, 325, 150, fill="#cdd6f4", width=2)
             c.create_text(180, 280, text="IN A", fill="#cdd6f4", font=("Arial", 10, "bold"))
 
-        elif gtype == 'NAND':
-            wp, wn = 2.0 * x_scale, float(n_in) * 1.0 * x_scale
-            output_y = 250
-            spacing_p = 380 / (n_in + 1 if n_in > 1 else 2)
-            pmos_x = [150 + i * spacing_p for i in range(n_in)]
-
-            c.create_line(150, 40, pmos_x[-1] + 15, 40, fill="#f9e2af", width=3)
-            c.create_line(150, output_y, pmos_x[-1] + 15, output_y, fill="#89b4fa", width=2)
-
-            nx = 520
-            nmos_spacing = 180 / n_in
-            nmos_y = [290 + i * nmos_spacing for i in range(n_in)]
-
-            c.create_line(nx + 15, output_y, nx + 15, nmos_y[0] - 15, fill="#89b4fa", width=2)
-            c.create_line(pmos_x[-1] + 15, output_y, nx + 15, output_y, fill="#89b4fa", width=3)
-            c.create_line(nx + 15, output_y, 700, output_y, fill="#89b4fa", width=3)
-            c.create_text(725, output_y, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
-
-            for i in range(n_in):
-                px = pmos_x[i]
-                ny = nmos_y[i]
-                in_lbl = f"In {chr(65+i)}"
-
-                self.draw_pmos(px, 140, wp, f"Mp{i+1}")
-                self.draw_nmos(nx, ny, wn, f"Mn{i+1}")
-
-                c.create_line(px + 15, 40, px + 15, 125, fill="#f9e2af", width=2)
-                c.create_line(px + 15, 155, px + 15, output_y, fill="#89b4fa", width=2)
-
-                if i < n_in - 1:
-                    c.create_line(nx + 15, ny + 15, nx + 15, nmos_y[i+1] - 15, fill="#89b4fa", width=2)
-
-                bus_y = 60 + i * 20
-                c.create_line(40, bus_y, px - 25, bus_y, fill="#cdd6f4", width=2)
-                c.create_line(px - 25, bus_y, px - 25, 140, fill="#cdd6f4", width=2)
-                c.create_line(px - 25, 140, px - 15, 140, fill="#cdd6f4", width=2)
-
-                c.create_line(px - 25, bus_y, nx - 25, bus_y, fill="#cdd6f4", width=1, dash=(2, 2))
-                c.create_line(nx - 25, bus_y, nx - 25, ny, fill="#cdd6f4", width=2)
-                c.create_line(nx - 25, ny, nx - 15, ny, fill="#cdd6f4", width=2)
-                c.create_text(30, bus_y, text=in_lbl, fill="#cdd6f4", font=("Arial", 9, "bold"))
-
-            c.create_line(nx + 15, nmos_y[-1] + 15, nx + 15, 520, fill="#a6adc8", width=2)
-
-        elif gtype == 'NOR':
-            wp, wn = float(n_in) * 2.0 * x_scale, 1.0 * x_scale
-            output_y = 280
-
-            px = 520
-            pmos_spacing = 160 / n_in
-            pmos_y = [110 + i * pmos_spacing for i in range(n_in)]
-
-            c.create_line(px + 15, 40, px + 15, pmos_y[0] - 15, fill="#f9e2af", width=2)
-            c.create_line(px + 15, pmos_y[-1] + 15, px + 15, output_y, fill="#89b4fa", width=2)
-
-            spacing_n = 380 / (n_in + 1 if n_in > 1 else 2)
-            nmos_x = [150 + i * spacing_n for i in range(n_in)]
-
-            c.create_line(150, output_y, nmos_x[-1] + 15, output_y, fill="#89b4fa", width=2)
-            c.create_line(150, 520, nmos_x[-1] + 15, 520, fill="#a6adc8", width=3)
-            c.create_line(px + 15, output_y, 700, output_y, fill="#89b4fa", width=3)
-            c.create_text(725, output_y, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
-
-            for i in range(n_in):
-                py = pmos_y[i]
-                nx = nmos_x[i]
-                in_lbl = f"In {chr(65+i)}"
-
-                self.draw_pmos(px, py, wp, f"Mp{i+1}")
-                self.draw_nmos(nx, 420, wn, f"Mn{i+1}")
-
-                if i < n_in - 1:
-                    c.create_line(px + 15, py + 15, px + 15, pmos_y[i+1] - 15, fill="#f38ba8", width=2)
-
-                c.create_line(nx + 15, output_y, nx + 15, 405, fill="#89b4fa", width=2)
-                c.create_line(nx + 15, 435, nx + 15, 520, fill="#a6adc8", width=2)
-
-                bus_y = 60 + i * 20
-                c.create_line(40, bus_y, nx - 25, bus_y, fill="#cdd6f4", width=2)
-                c.create_line(nx - 25, bus_y, nx - 25, 420, fill="#cdd6f4", width=2)
-                c.create_line(nx - 25, 420, nx - 15, 420, fill="#cdd6f4", width=2)
-
-                c.create_line(nx - 25, bus_y, px - 25, bus_y, fill="#cdd6f4", width=1, dash=(2, 2))
-                c.create_line(px - 25, bus_y, px - 25, py, fill="#cdd6f4", width=2)
-                c.create_line(px - 25, py, px - 15, py, fill="#cdd6f4", width=2)
-                c.create_text(30, bus_y, text=in_lbl, fill="#cdd6f4", font=("Arial", 9, "bold"))
-
         elif gtype in ('XOR', 'XNOR'):
-            w_inv_p, w_inv_n = 2.0 * x_scale, 1.0 * x_scale
             w_core_p, w_core_n = 4.0 * x_scale, 2.0 * x_scale
-
-            self.draw_pmos(110, 130, w_inv_p, "PM5 (a)")
-            c.create_line(125, 40, 125, 115, fill="#f9e2af", width=2)
-            self.draw_nmos(110, 430, w_inv_n, "NM0 (a)")
-            c.create_line(125, 445, 125, 520, fill="#a6adc8", width=2)
-            c.create_line(125, 145, 125, 415, fill="#74c7ec", width=2)
-            c.create_text(125, 280, text="a_not", fill="#74c7ec", font=("Arial", 8, "bold"))
-
-            c.create_line(40, 280, 75, 280, fill="#cdd6f4", width=2)
-            c.create_line(75, 130, 75, 430, fill="#cdd6f4", width=2)
-            c.create_line(75, 130, 85, 130, fill="#cdd6f4", width=2)
-            c.create_line(75, 430, 85, 430, fill="#cdd6f4", width=2)
-            c.create_text(30, 280, text="a", fill="#cdd6f4", font=("Arial", 10, "bold"))
-
-            self.draw_pmos(260, 130, w_inv_p, "PM4 (b)")
-            c.create_line(275, 40, 275, 115, fill="#f9e2af", width=2)
-            self.draw_nmos(260, 430, w_inv_n, "NM1 (b)")
-            c.create_line(275, 445, 275, 520, fill="#a6adc8", width=2)
-            c.create_line(275, 145, 275, 415, fill="#74c7ec", width=2)
-            c.create_text(275, 280, text="b_not", fill="#74c7ec", font=("Arial", 8, "bold"))
-
-            c.create_line(190, 280, 225, 280, fill="#cdd6f4", width=2)
-            c.create_line(225, 130, 225, 430, fill="#cdd6f4", width=2)
-            c.create_line(225, 130, 235, 130, fill="#cdd6f4", width=2)
-            c.create_line(225, 430, 235, 430, fill="#cdd6f4", width=2)
-            c.create_text(180, 280, text="b", fill="#cdd6f4", font=("Arial", 10, "bold"))
+            c.create_rectangle(380, 80, 680, 480, outline="#a6e3a1", width=2, dash=(4, 4))
+            c.create_text(530, 65, text=f"CORE {gtype} LOGIC BLOCK", fill="#a6e3a1", font=("Arial", 9, "bold"))
 
             if gtype == 'XOR':
-                self.draw_pmos(450, 110, w_core_p, "PM3 (a)")
-                self.draw_pmos(590, 110, w_core_p, "PM2 (b)")
-                self.draw_pmos(450, 200, w_core_p, "PM0 (a_not)")
-                self.draw_pmos(590, 200, w_core_p, "PM1 (b_not)")
+                self.draw_pmos(450, 110, w_core_p, "PM3 (A)")
+                self.draw_pmos(590, 110, w_core_p, "PM2 (B)")
+                self.draw_pmos(450, 200, w_core_p, "PM0 (A_bar)")
+                self.draw_pmos(590, 200, w_core_p, "PM1 (B_bar)")
 
-                self.draw_nmos(450, 360, w_core_n, "NM4 (a_not)")
-                self.draw_nmos(450, 450, w_core_n, "NM2 (b_not)")
-                self.draw_nmos(590, 360, w_core_n, "NM5 (a)")
-                self.draw_nmos(590, 450, w_core_n, "NM3 (b)")
-
+                self.draw_nmos(450, 360, w_core_n, "NM4 (A_bar)")
+                self.draw_nmos(450, 450, w_core_n, "NM2 (B_bar)")
+                self.draw_nmos(590, 360, w_core_n, "NM5 (A)")
+                self.draw_nmos(590, 450, w_core_n, "NM3 (B)")
             else:
-                self.draw_pmos(450, 110, w_core_p, "PM1 (a)")
-                self.draw_pmos(590, 110, w_core_p, "PM2 (b_not)")
-                self.draw_pmos(450, 200, w_core_p, "PM0 (a_not)")
-                self.draw_pmos(590, 200, w_core_p, "PM3 (b)")
+                self.draw_pmos(450, 110, w_core_p, "PM1 (A)")
+                self.draw_pmos(590, 110, w_core_p, "PM2 (B_bar)")
+                self.draw_pmos(450, 200, w_core_p, "PM0 (A_bar)")
+                self.draw_pmos(590, 200, w_core_p, "PM3 (B)")
 
-                self.draw_nmos(450, 360, w_core_n, "NM4 (a_not)")
-                self.draw_nmos(450, 450, w_core_n, "NM2 (b)")
-                self.draw_nmos(590, 360, w_core_n, "NM5 (a)")
-                self.draw_nmos(590, 450, w_core_n, "NM3 (b_not)")
+                self.draw_nmos(450, 360, w_core_n, "NM4 (A_bar)")
+                self.draw_nmos(450, 450, w_core_n, "NM2 (B)")
+                self.draw_nmos(590, 360, w_core_n, "NM5 (A)")
+                self.draw_nmos(590, 450, w_core_n, "NM3 (B_bar)")
 
             c.create_line(465, 40, 465, 95, fill="#f9e2af", width=2)
             c.create_line(605, 40, 605, 95, fill="#f9e2af", width=2)
-
             c.create_line(465, 125, 465, 185, fill="#f38ba8", width=2)
             c.create_line(605, 125, 605, 185, fill="#f38ba8", width=2)
             c.create_line(465, 155, 605, 155, fill="#f38ba8", width=2)
@@ -700,19 +632,17 @@ class TransistorSchematicWindow(tk.Toplevel):
 
             c.create_line(465, 375, 465, 435, fill="#89b4fa", width=2)
             c.create_line(605, 375, 605, 435, fill="#89b4fa", width=2)
-
             c.create_line(465, 465, 465, 520, fill="#a6adc8", width=2)
             c.create_line(605, 465, 605, 520, fill="#a6adc8", width=2)
 
             c.create_line(465, 280, 465, 345, fill="#89b4fa", width=2)
             c.create_line(605, 280, 605, 345, fill="#89b4fa", width=2)
-
-            c.create_line(535, 280, 720, 280, fill="#89b4fa", width=3)
-            c.create_text(745, 280, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
+            c.create_line(535, 280, 740, 280, fill="#89b4fa", width=3)
+            c.create_text(755, 280, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
 
 
 # =====================================================================
-# SCHEMATIC CANVAS WITH CRITICAL PATH HIGHLIGHTING & GRAPHICAL PATH DRAW
+# SCHEMATIC CANVAS WITH STAGE NUMBER DISPLAY
 # =====================================================================
 class SchematicCanvas(tk.Canvas):
     GRID_SIZE = 20
@@ -723,19 +653,15 @@ class SchematicCanvas(tk.Canvas):
         self.wires = []
         self.next_node_id = 1
         
-        # Undo history stack
         self.undo_stack = []
 
-        # Critical path highlighting state
         self.highlight_path = True
         self.critical_full_path = []
 
-        # Interactive Graphical Path Drawing State
         self.is_drawing_path = False
         self.building_path_nodes = []
         self.on_graphical_path_complete = None
 
-        # Pan and Zoom state variables
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -746,27 +672,23 @@ class SchematicCanvas(tk.Canvas):
         self.temp_wire_line = None
         self.on_node_selected = None
 
-        # Bind Mouse & Gestures
         self.bind("<ButtonPress-1>", self.on_click)
         self.bind("<Double-Button-1>", self.on_double_click)
         self.bind("<B1-Motion>", self.on_drag)
         self.bind("<ButtonRelease-1>", self.on_release)
         self.bind("<Motion>", self.on_mouse_move)
 
-        # Pan bindings
         self.bind("<ButtonPress-2>", self.start_pan)
         self.bind("<B2-Motion>", self.do_pan)
         self.bind("<ButtonPress-3>", self.start_pan)
         self.bind("<B3-Motion>", self.do_pan)
 
-        # Zoom bindings
         self.bind("<MouseWheel>", self.on_zoom_wheel)
         self.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1.1))
         self.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, 0.9))
 
         self.draw_grid()
 
-    # --- UNDO SYSTEM ---
     def push_undo(self):
         state = {
             'nodes': copy.deepcopy(self.nodes),
@@ -790,7 +712,6 @@ class SchematicCanvas(tk.Canvas):
         self.render()
         return True
 
-    # --- COORDINATE TRANSFORMATIONS ---
     def to_screen(self, wx, wy):
         return (wx * self.zoom + self.pan_x, wy * self.zoom + self.pan_y)
 
@@ -800,7 +721,6 @@ class SchematicCanvas(tk.Canvas):
     def snap(self, val):
         return round(val / self.GRID_SIZE) * self.GRID_SIZE
 
-    # --- ZOOM & PAN CONTROLS ---
     def start_pan(self, event):
         self.pan_start = (event.x, event.y)
 
@@ -862,14 +782,16 @@ class SchematicCanvas(tk.Canvas):
         elif gtype == 'NOR':
             return float(2 * inputs + 1)
         elif gtype in ('XOR', 'XNOR'):
-            return 9.0
+            return 6.0
         return 3.0
 
-    def add_node(self, gtype, x=100, y=100, inputs=2, size=None, cl=120.0, locked=False, name=None):
+    def add_node(self, gtype, x=100, y=100, inputs=3, size=None, cl=120.0, name=None):
         self.push_undo()
 
-        if gtype in ('INV', 'XOR', 'XNOR'):
-            inputs = 1 if gtype == 'INV' else 2
+        if gtype in ('XOR', 'XNOR'):
+            inputs = 4
+        elif gtype == 'INV':
+            inputs = 1
         elif gtype in ('INPUT', 'OUTPUT'):
             inputs = 1 if gtype == 'OUTPUT' else 0
         else:
@@ -905,7 +827,7 @@ class SchematicCanvas(tk.Canvas):
             'inputs': inputs,
             'size': float(size),
             'cl': float(cl),
-            'locked': locked
+            'separate_inv': True
         }
         self.selected_node_id = node_id
         if callable(self.on_node_selected):
@@ -932,6 +854,16 @@ class SchematicCanvas(tk.Canvas):
             out_pins.append((x + 40, y))
 
         return in_pins, out_pins
+
+    def get_pin_labels(self, node):
+        gtype = node['type']
+        n_in = node['inputs']
+        if gtype in ('XOR', 'XNOR'):
+            return ["A", "A_bar", "B", "B_bar"]
+        elif gtype == 'INV':
+            return ["A"]
+        else:
+            return [chr(65 + i) for i in range(n_in)]
 
     def find_pin_at(self, sx, sy, radius=12):
         wx, wy = self.to_world(sx, sy)
@@ -965,14 +897,12 @@ class SchematicCanvas(tk.Canvas):
         return None
 
     def on_click(self, event):
-        # 1. Handle Interactive Graphical Path Selection Click
         if self.is_drawing_path:
             nid = self.find_node_at(event.x, event.y)
             if nid and nid in self.nodes:
                 if not self.building_path_nodes or self.building_path_nodes[-1] != nid:
                     self.building_path_nodes.append(nid)
                     self.render()
-                    # Check if reached Output gate to finish drawing
                     if self.nodes[nid]['type'] == 'OUTPUT':
                         self.is_drawing_path = False
                         self.config(cursor="arrow")
@@ -980,7 +910,6 @@ class SchematicCanvas(tk.Canvas):
                             self.on_graphical_path_complete(list(self.building_path_nodes))
             return
 
-        # 2. Standard Click / Wiring Logic
         pin = self.find_pin_at(event.x, event.y)
         if pin:
             if pin[1] == 'out':
@@ -1002,7 +931,8 @@ class SchematicCanvas(tk.Canvas):
         if nid and nid in self.nodes:
             node = self.nodes[nid]
             if node['type'] not in ('INPUT', 'OUTPUT'):
-                TransistorSchematicWindow(self.winfo_toplevel(), node)
+                stg = compute_stage_numbers(self.nodes, self.wires).get(nid, None)
+                TransistorSchematicWindow(self.winfo_toplevel(), node, stage_num=stg)
 
     def on_drag(self, event):
         if self.is_drawing_path:
@@ -1047,12 +977,10 @@ class SchematicCanvas(tk.Canvas):
         pin = self.find_pin_at(event.x, event.y)
         self.config(cursor="hand2" if pin else "arrow")
 
-    # --- A* ORTHOGONAL ROUTING ROUTINE ---
     def route_wire_a_star(self, start_pos, end_pos, occupied_wire_cells):
         sx, sy = self.snap(start_pos[0]), self.snap(start_pos[1])
         ex, ey = self.snap(end_pos[0]), self.snap(end_pos[1])
 
-        # 1. Build Gate Bounding Box Obstacles
         obstacles = set()
         padding = 10
         for nid, node in self.nodes.items():
@@ -1062,13 +990,11 @@ class SchematicCanvas(tk.Canvas):
                 for oy in range(self.snap(ny - h_h - padding), self.snap(ny + h_h + padding) + 1, self.GRID_SIZE):
                     obstacles.add((ox, oy))
 
-        # 2. Keep Terminal Pins Clear
         for dx in (-self.GRID_SIZE, 0, self.GRID_SIZE):
             for dy in (-self.GRID_SIZE, 0, self.GRID_SIZE):
                 obstacles.discard((sx + dx, sy + dy))
                 obstacles.discard((ex + dx, ey + dy))
 
-        # 3. A* Search
         open_set = []
         heapq.heappush(open_set, (0, 0, sx, sy, None))
         came_from = {}
@@ -1116,17 +1042,16 @@ class SchematicCanvas(tk.Canvas):
             mx = (sx + ex) / 2
             return simplify_path([(sx, sy), (mx, sy), (mx, ey), (ex, ey)])
 
-    # --- RENDERER WITH PATH HIGHLIGHTING ---
     def render(self):
         self.delete("schematic")
         self.draw_grid()
 
-        # Build critical path node and wire sets for visual highlighting
+        stage_map = compute_stage_numbers(self.nodes, self.wires)
+
         active_path = self.building_path_nodes if self.is_drawing_path else self.critical_full_path
         crit_nodes = set(active_path) if self.highlight_path or self.is_drawing_path else set()
         crit_wire_tuples = set(zip(active_path[:-1], active_path[1:])) if self.highlight_path or self.is_drawing_path else set()
 
-        # 1. Route All Wires using A* Obstacle & Overlap Avoidance
         routed_world_paths = []
         occupied_wire_cells = set()
 
@@ -1148,7 +1073,6 @@ class SchematicCanvas(tk.Canvas):
                     for pt in path:
                         occupied_wire_cells.add(pt)
 
-        # 2. Convert Simplified Paths to Screen Segments
         screen_h_segments = []
         screen_v_segments = []
 
@@ -1156,12 +1080,11 @@ class SchematicCanvas(tk.Canvas):
             s_path = [self.to_screen(px, py) for px, py in w_path]
             for i in range(len(s_path) - 1):
                 p1, p2 = s_path[i], s_path[i+1]
-                if abs(p1[1] - p2[1]) < 1:  # Horizontal Segment
+                if abs(p1[1] - p2[1]) < 1:
                     screen_h_segments.append({'x1': p1[0], 'x2': p2[0], 'y': p1[1], 'wire_idx': w_idx, 'is_crit': is_critical})
-                elif abs(p1[0] - p2[0]) < 1:  # Vertical Segment
+                elif abs(p1[0] - p2[0]) < 1:
                     screen_v_segments.append({'x': p1[0], 'y1': p1[1], 'y2': p2[1], 'wire_idx': w_idx, 'is_crit': is_critical})
 
-        # Helper to draw horizontal line segment with semicircular bridge arcs over vertical lines
         def draw_horizontal_with_bridges(x1, x2, y, wire_idx, is_critical):
             start_x, end_x = min(x1, x2), max(x1, x2)
             if abs(start_x - end_x) < 2:
@@ -1185,7 +1108,6 @@ class SchematicCanvas(tk.Canvas):
                 if cx - r > curr_x:
                     self.create_line(curr_x, y, cx - r, y, fill=color, width=w_stroke, tags="schematic")
                 
-                # Draw Jump Arc
                 self.create_arc(cx - r, y - r, cx + r, y + r, start=0, extent=180, style=tk.ARC,
                                 outline=color, width=w_stroke, tags="schematic")
                 curr_x = cx + r
@@ -1193,17 +1115,14 @@ class SchematicCanvas(tk.Canvas):
             if curr_x < end_x:
                 self.create_line(curr_x, y, end_x, y, fill=color, width=w_stroke, tags="schematic")
 
-        # 3. Draw Vertical Segments
         for v in screen_v_segments:
             color = "#f5c2e7" if (self.is_drawing_path and v['is_crit']) else ("#ffd54f" if v['is_crit'] else "#89b4fa")
             w_stroke = max(3, int(4 * self.zoom)) if v['is_crit'] else max(2, int(3 * self.zoom))
             self.create_line(v['x'], v['y1'], v['x'], v['y2'], fill=color, width=w_stroke, tags="schematic")
 
-        # 4. Draw Horizontal Segments with Jump Bridges
         for h in screen_h_segments:
             draw_horizontal_with_bridges(h['x1'], h['x2'], h['y'], h['wire_idx'], h['is_crit'])
 
-        # 5. Draw Nodes
         for nid, node in self.nodes.items():
             wx, wy = node['x'], node['y']
             x, y = self.to_screen(wx, wy)
@@ -1211,9 +1130,10 @@ class SchematicCanvas(tk.Canvas):
             name = node.get('name', f"{gtype}{nid}")
             is_selected = (nid == self.selected_node_id)
             is_critical = nid in crit_nodes
+            stg = stage_map.get(nid, None)
 
             if self.is_drawing_path and is_critical:
-                outline_color = "#f5c2e7"  # Pink highlight during graphical path draw
+                outline_color = "#f5c2e7"
                 wire_width = max(3, int(4 * self.zoom))
             elif is_selected and is_critical:
                 outline_color = "#ff9800"
@@ -1280,21 +1200,35 @@ class SchematicCanvas(tk.Canvas):
                 self.create_text(x, y, text=lbl_str, fill="#11111b", font=("Arial", max(7, int(8 * self.zoom)), "bold"), tags="schematic")
 
             if gtype not in ('INPUT', 'OUTPUT'):
-                lock_str = " 🔒" if node.get('locked', False) else ""
-                lbl = f"{name} (Cin={node['size']:.1f}C){lock_str}"
+                lbl = f"[Stage {stg}] {name} (Cin={node['size']:.1f}C)"
                 self.create_text(x, y - max(30*self.zoom, node['inputs']*10*self.zoom), text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
 
             in_pins, out_pins = self.get_pin_positions(node)
-            for px, py in in_pins:
+            pin_labels = self.get_pin_labels(node)
+
+            for idx, (px, py) in enumerate(in_pins):
                 spx, spy = self.to_screen(px, py)
                 self.create_oval(spx-4*self.zoom, spy-4*self.zoom, spx+4*self.zoom, spy+4*self.zoom, fill="#f38ba8", outline="#ffffff", tags="schematic")
+                
+                if idx < len(pin_labels) and gtype not in ('INPUT', 'OUTPUT'):
+                    lbl_text = pin_labels[idx]
+                    self.create_text(spx - 8 * self.zoom, spy, text=lbl_text, fill="#f5c2e7", 
+                                     font=("Arial", max(6, int(8 * self.zoom)), "bold"), anchor="e", tags="schematic")
+
             for px, py in out_pins:
                 spx, spy = self.to_screen(px, py)
                 self.create_oval(spx-4*self.zoom, spy-4*self.zoom, spx+4*self.zoom, spy+4*self.zoom, fill="#a6e3a1", outline="#ffffff", tags="schematic")
 
-        # 6. Display Graphical Path Draw Banner Prompt
         if self.is_drawing_path:
-            p_names = [self.nodes[nid].get('name', str(nid)) for nid in self.building_path_nodes]
+            p_names = []
+            for nid in self.building_path_nodes:
+                n = self.nodes[nid]
+                if n['type'] == 'INPUT':
+                    p_names.append(n.get('name', str(nid)))
+                elif n['type'] == 'OUTPUT':
+                    p_names.append(f"{n.get('name', str(nid))} ({n['cl']}C)")
+                else:
+                    p_names.append(f"{n.get('name', str(nid))}[S{stage_map.get(nid, '?')}]")
             path_str = " -> ".join(p_names) if p_names else "None"
             msg = f"🎯 GRAPHICAL PATH MODE: Click gates in order (Start Input -> Logic Gates -> Output Pin)\nSelected: {path_str}"
             self.create_rectangle(10, 10, self.winfo_width()-10 if self.winfo_width() > 100 else 600, 50, fill="#f5c2e7", outline="#11111b", tags="schematic")
@@ -1307,8 +1241,8 @@ class SchematicCanvas(tk.Canvas):
 class VLSIWorkbenchApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("VLSI Logical Effort Schematic Workbench")
-        self.geometry("1320x780")
+        self.title("VLSI Logical Effort & Stick Diagram Workbench")
+        self.geometry("1340x820")
         self.configure(bg="#181825")
 
         self.custom_graphical_path = None
@@ -1324,7 +1258,6 @@ class VLSIWorkbenchApp(tk.Tk):
         toolbar = ttk.Frame(self, padding=5)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
-        # ROW 1: Editing Controls
         row1 = ttk.Frame(toolbar)
         row1.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
@@ -1336,7 +1269,7 @@ class VLSIWorkbenchApp(tk.Tk):
         
         ttk.Label(row1, text="Inputs (N):").pack(side=tk.LEFT, padx=(6, 2))
         self.inputs_spin = ttk.Spinbox(row1, from_=2, to=8, width=3)
-        self.inputs_spin.set(2)
+        self.inputs_spin.set(3)
         self.inputs_spin.pack(side=tk.LEFT, padx=2)
 
         ttk.Button(row1, text="+ NAND", command=lambda: self.add_gate('NAND')).pack(side=tk.LEFT, padx=2)
@@ -1349,9 +1282,8 @@ class VLSIWorkbenchApp(tk.Tk):
         ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
         ttk.Button(row1, text="🗑️ Delete", command=self.delete_selected_node).pack(side=tk.LEFT, padx=2)
 
-        # ROW 2: Viewport & Calculation & Path Controls
         row2 = ttk.Frame(toolbar)
-        row2.pack(side=tk.TOP, fill=tk.X)
+        row2.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
         ttk.Label(row2, text="Zoom:").pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="🔍+", command=lambda: self.canvas.zoom_at(400, 300, 1.2)).pack(side=tk.LEFT, padx=1)
@@ -1365,22 +1297,23 @@ class VLSIWorkbenchApp(tk.Tk):
 
         ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
 
-        # Path Highlighting Checkbox, Graphical Draw Button, Auto Reset & Path Selection Dropdown
         self.highlight_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2, text="✨ Highlight Path", variable=self.highlight_var, command=self.toggle_path_highlight).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(row2, text="🎯 Draw Path", command=self.start_draw_path_mode).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="🔄 Auto Path", command=self.reset_to_auto_path).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(row2, text="Path:").pack(side=tk.LEFT, padx=(6, 2))
-        self.path_combo = ttk.Combobox(row2, state="readonly", width=36)
+        row3 = ttk.Frame(toolbar)
+        row3.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(row3, text="Path Selection:").pack(side=tk.LEFT, padx=(3, 2))
+        self.path_combo = ttk.Combobox(row3, state="readonly", width=55)
         self.path_combo.pack(side=tk.LEFT, padx=2)
         self.path_combo.bind("<<ComboboxSelected>>", lambda e: self.on_path_combo_selected())
 
-        ttk.Button(row2, text="⚡ Calculate Effort", command=self.run_calc).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(row2, text="📊 Truth Table", command=self.show_truth_table_popup).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(row3, text="⚡ Calculate & Size Effort", command=self.run_calc).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(row3, text="📊 Truth Table", command=self.show_truth_table_popup).pack(side=tk.RIGHT, padx=2)
 
-        # Canvas & Sidebar Split Frame
         main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True)
 
@@ -1437,17 +1370,16 @@ class VLSIWorkbenchApp(tk.Tk):
         self.canvas.is_drawing_path = False
         self.canvas.building_path_nodes = []
         self.canvas.config(cursor="arrow")
-        self.path_combo.current(0) if self.path_combo['values'] else None
+        if self.path_combo['values']:
+            self.path_combo.current(0)
         self.run_calc()
 
     def on_graphical_path_complete(self, path_sequence):
-        # Validate that path contains at least 2 nodes
         if len(path_sequence) < 2:
             messagebox.showwarning("Path Error", "Path must contain at least 2 connected nodes.")
             self.reset_to_auto_path()
             return
 
-        # Validate wire connections between consecutive gates
         out_edges = {n: [] for n in self.canvas.nodes}
         for w in self.canvas.wires:
             out_edges[w['from_id']].append(w['to_id'])
@@ -1464,7 +1396,6 @@ class VLSIWorkbenchApp(tk.Tk):
         self.run_calc()
 
     def on_path_combo_selected(self):
-        # If user changed dropdown manually, clear graphical override unless index 1 is graphical
         sel_str = self.path_combo.get()
         if "[Graphical Custom]" not in sel_str:
             self.custom_graphical_path = None
@@ -1485,7 +1416,7 @@ class VLSIWorkbenchApp(tk.Tk):
             self.btn_toggle_details.config(text="▲ Hide Detailed Calculations")
 
     def add_gate(self, gtype):
-        n_in = int(self.inputs_spin.get()) if gtype in ('NAND', 'NOR') else (2 if gtype in ('XOR', 'XNOR') else 1)
+        n_in = int(self.inputs_spin.get()) if gtype in ('NAND', 'NOR') else (4 if gtype in ('XOR', 'XNOR') else 1)
         self.canvas.add_node(gtype, x=100, y=100, inputs=n_in)
 
     def show_truth_table_popup(self):
@@ -1512,6 +1443,15 @@ class VLSIWorkbenchApp(tk.Tk):
             return
 
         node = self.canvas.nodes[node_id]
+        stage_map = compute_stage_numbers(self.canvas.nodes, self.canvas.wires)
+        stg = stage_map.get(node_id, None)
+
+        if node['type'] not in ('INPUT', 'OUTPUT'):
+            ttk.Label(self.prop_frame, text=f"Topological Stage: Stage {stg}", font=("Arial", 9, "bold"), foreground="#ffd54f").pack(anchor=tk.W, pady=(0, 6))
+        elif node['type'] == 'INPUT':
+            ttk.Label(self.prop_frame, text="Primary Input Pin", font=("Arial", 9, "bold"), foreground="#a6e3a1").pack(anchor=tk.W, pady=(0, 6))
+        else:
+            ttk.Label(self.prop_frame, text="Primary Output Load Pin", font=("Arial", 9, "bold"), foreground="#f38ba8").pack(anchor=tk.W, pady=(0, 6))
 
         ttk.Label(self.prop_frame, text="Label / Name:").pack(anchor=tk.W, pady=(0, 2))
         name_var = tk.StringVar(value=node.get('name', f"{node['type']}{node['id']}"))
@@ -1530,6 +1470,26 @@ class VLSIWorkbenchApp(tk.Tk):
         name_entry.bind("<Return>", lambda e: self.focus())
 
         if node['type'] not in ('INPUT', 'OUTPUT'):
+            if node['type'] in ('NAND', 'NOR'):
+                ttk.Label(self.prop_frame, text="Number of Inputs (N):").pack(anchor=tk.W, pady=(4, 0))
+                nin_var = tk.IntVar(value=node['inputs'])
+
+                def update_nin(*args):
+                    try:
+                        val = nin_var.get()
+                        if val != node['inputs'] and 2 <= val <= 8:
+                            self.canvas.push_undo()
+                            node['inputs'] = val
+                            self.canvas.wires = [w for w in self.canvas.wires if not (w['to_id'] == node['id'] and w['to_pin'] >= val)]
+                            self.canvas.render()
+                    except tk.TclError:
+                        pass
+
+                nin_spin = ttk.Spinbox(self.prop_frame, from_=2, to=8, textvariable=nin_var)
+                nin_spin.pack(fill=tk.X, pady=(0, 6))
+                nin_spin.bind("<FocusIn>", lambda e: self.canvas.push_undo())
+                nin_spin.bind("<Return>", lambda e: update_nin())
+
             ttk.Label(self.prop_frame, text="Input Cap S (in terms of C):").pack(anchor=tk.W, pady=(5, 0))
             size_var = tk.DoubleVar(value=node['size'])
             
@@ -1545,21 +1505,26 @@ class VLSIWorkbenchApp(tk.Tk):
             size_var.trace_add("write", on_size_change)
             size_spin = ttk.Spinbox(self.prop_frame, from_=0.1, to=1000.0, increment=1.0, textvariable=size_var)
             size_spin.pack(fill=tk.X)
+            input_driven = any(
+                wire['to_id'] == node['id']
+                and self.canvas.nodes.get(wire['from_id'], {}).get('type') == 'INPUT'
+                for wire in self.canvas.wires
+            )
+            if input_driven:
+                size_spin.configure(state=tk.DISABLED)
             size_spin.bind("<FocusIn>", lambda e: self.canvas.push_undo())
             size_spin.bind("<Return>", lambda e: self.focus())
 
-            locked_var = tk.BooleanVar(value=node.get('locked', False))
-
-            def update_lock():
-                self.canvas.push_undo()
-                node['locked'] = locked_var.get()
-                self.canvas.render()
-
-            lock_chk = ttk.Checkbutton(self.prop_frame, text="🔒 Lock Input Cap S", variable=locked_var, command=update_lock)
-            lock_chk.pack(anchor=tk.W, pady=8)
+            if node['type'] in ('XOR', 'XNOR'):
+                ttk.Label(
+                    self.prop_frame, 
+                    text="🔀 Separated Inverters Model\n   (Inputs: A, A_bar, B, B_bar)", 
+                    font=("Arial", 8, "italic"),
+                    foreground="#fab387"
+                ).pack(anchor=tk.W, pady=4)
 
             ttk.Button(self.prop_frame, text="🔍 Transistor View", 
-                       command=lambda: TransistorSchematicWindow(self, node)).pack(fill=tk.X, pady=4)
+                       command=lambda: TransistorSchematicWindow(self, node, stage_num=stg)).pack(fill=tk.X, pady=4)
 
         if node['type'] == 'OUTPUT':
             ttk.Label(self.prop_frame, text="Load Cap CL (in terms of C):").pack(anchor=tk.W, pady=(5, 0))
@@ -1613,6 +1578,8 @@ class VLSIWorkbenchApp(tk.Tk):
                 data = json.load(f)
 
             self.canvas.nodes = {n['id']: n for n in data.get("nodes", [])}
+            for node in self.canvas.nodes.values():
+                node.pop('locked', None)
             self.canvas.wires = data.get("wires", [])
             max_id = max([n['id'] for n in self.canvas.nodes.values()], default=0)
             self.canvas.next_node_id = max_id + 1
@@ -1625,13 +1592,12 @@ class VLSIWorkbenchApp(tk.Tk):
     def run_calc(self):
         graph_data = self.get_graph_export()
         
-        # Calculate manual path index offset if graphical custom path exists
         raw_idx = self.path_combo.current()
         if raw_idx < 0:
             raw_idx = 0
 
         if self.custom_graphical_path:
-            manual_idx = 0  # Rely on custom_graphical_path override
+            manual_idx = 0
         else:
             manual_idx = raw_idx
 
@@ -1639,11 +1605,10 @@ class VLSIWorkbenchApp(tk.Tk):
             graph_data, manual_path_index=manual_idx, custom_graphical_path=self.custom_graphical_path
         )
 
-        # Update Path Combo options
         self.path_combo['values'] = path_options
 
         if self.custom_graphical_path:
-            self.path_combo.current(1)  # Index 1 corresponds to [Graphical Custom]
+            self.path_combo.current(1)
         elif raw_idx < len(path_options):
             self.path_combo.current(raw_idx)
         else:
@@ -1663,8 +1628,7 @@ class VLSIWorkbenchApp(tk.Tk):
             for nid, new_cin in cin_dict.items():
                 if nid in self.canvas.nodes:
                     node = self.canvas.nodes[nid]
-                    if not node.get('locked', False):
-                        node['size'] = float(round(new_cin, 1))
+                    node['size'] = float(round(new_cin, 1))
 
             self.canvas.render()
             if self.canvas.selected_node_id:
