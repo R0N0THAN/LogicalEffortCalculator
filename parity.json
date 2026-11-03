@@ -1,0 +1,337 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "name": "INV1",
+      "type": "INV",
+      "x": 220,
+      "y": 340,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 2,
+      "name": "INV2",
+      "type": "INV",
+      "x": 220,
+      "y": 420,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 3,
+      "name": "INV3",
+      "type": "INV",
+      "x": 220,
+      "y": 500,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 4,
+      "name": "INV4",
+      "type": "INV",
+      "x": 220,
+      "y": 580,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 5,
+      "name": "INV5",
+      "type": "INV",
+      "x": 400,
+      "y": 340,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 6,
+      "name": "INV6",
+      "type": "INV",
+      "x": 400,
+      "y": 420,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 7,
+      "name": "INV7",
+      "type": "INV",
+      "x": 400,
+      "y": 500,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 8,
+      "name": "INV8",
+      "type": "INV",
+      "x": 400,
+      "y": 580,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 9,
+      "name": "INV9",
+      "type": "INV",
+      "x": 760,
+      "y": 340,
+      "inputs": 1,
+      "size": 6.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 10,
+      "name": "A",
+      "type": "INPUT",
+      "x": 100,
+      "y": 340,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 11,
+      "name": "B",
+      "type": "INPUT",
+      "x": 100,
+      "y": 420,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 12,
+      "name": "C",
+      "type": "INPUT",
+      "x": 100,
+      "y": 500,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 13,
+      "name": "D",
+      "type": "INPUT",
+      "x": 100,
+      "y": 580,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 14,
+      "name": "XNOR1",
+      "type": "XNOR",
+      "x": 600,
+      "y": 380,
+      "inputs": 4,
+      "size": 16.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 15,
+      "name": "XNOR2",
+      "type": "XNOR",
+      "x": 600,
+      "y": 540,
+      "inputs": 4,
+      "size": 16.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 16,
+      "name": "INV10",
+      "type": "INV",
+      "x": 760,
+      "y": 540,
+      "inputs": 1,
+      "size": 6.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 17,
+      "name": "XNOR3",
+      "type": "XNOR",
+      "x": 900,
+      "y": 440,
+      "inputs": 4,
+      "size": 40.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    },
+    {
+      "id": 18,
+      "name": "OUT",
+      "type": "OUTPUT",
+      "x": 1060,
+      "y": 440,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false,
+      "separate_inv": true
+    }
+  ],
+  "wires": [
+    {
+      "from_id": 10,
+      "to_id": 1,
+      "to_pin": 0
+    },
+    {
+      "from_id": 11,
+      "to_id": 2,
+      "to_pin": 0
+    },
+    {
+      "from_id": 12,
+      "to_id": 3,
+      "to_pin": 0
+    },
+    {
+      "from_id": 13,
+      "to_id": 4,
+      "to_pin": 0
+    },
+    {
+      "from_id": 4,
+      "to_id": 8,
+      "to_pin": 0
+    },
+    {
+      "from_id": 3,
+      "to_id": 7,
+      "to_pin": 0
+    },
+    {
+      "from_id": 2,
+      "to_id": 6,
+      "to_pin": 0
+    },
+    {
+      "from_id": 1,
+      "to_id": 5,
+      "to_pin": 0
+    },
+    {
+      "from_id": 7,
+      "to_id": 15,
+      "to_pin": 1
+    },
+    {
+      "from_id": 3,
+      "to_id": 15,
+      "to_pin": 0
+    },
+    {
+      "from_id": 4,
+      "to_id": 15,
+      "to_pin": 2
+    },
+    {
+      "from_id": 8,
+      "to_id": 15,
+      "to_pin": 3
+    },
+    {
+      "from_id": 2,
+      "to_id": 14,
+      "to_pin": 2
+    },
+    {
+      "from_id": 6,
+      "to_id": 14,
+      "to_pin": 3
+    },
+    {
+      "from_id": 1,
+      "to_id": 14,
+      "to_pin": 0
+    },
+    {
+      "from_id": 5,
+      "to_id": 14,
+      "to_pin": 1
+    },
+    {
+      "from_id": 14,
+      "to_id": 9,
+      "to_pin": 0
+    },
+    {
+      "from_id": 15,
+      "to_id": 16,
+      "to_pin": 0
+    },
+    {
+      "from_id": 9,
+      "to_id": 17,
+      "to_pin": 1
+    },
+    {
+      "from_id": 14,
+      "to_id": 17,
+      "to_pin": 0
+    },
+    {
+      "from_id": 15,
+      "to_id": 17,
+      "to_pin": 2
+    },
+    {
+      "from_id": 16,
+      "to_id": 17,
+      "to_pin": 3
+    },
+    {
+      "from_id": 17,
+      "to_id": 18,
+      "to_pin": 0
+    }
+  ]
+}

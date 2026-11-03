@@ -1,0 +1,292 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "name": "INV1",
+      "type": "INV",
+      "x": 220,
+      "y": 180,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": true
+    },
+    {
+      "id": 2,
+      "name": "D",
+      "type": "INPUT",
+      "x": 120,
+      "y": 180,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 3,
+      "name": "CLK",
+      "type": "INPUT",
+      "x": 120,
+      "y": 420,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 4,
+      "name": "INV2",
+      "type": "INV",
+      "x": 220,
+      "y": 420,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": true
+    },
+    {
+      "id": 5,
+      "name": "INV3",
+      "type": "INV",
+      "x": 380,
+      "y": 300,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 6,
+      "name": "NAND1",
+      "type": "NAND",
+      "x": 500,
+      "y": 140,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 7,
+      "name": "NAND2",
+      "type": "NAND",
+      "x": 500,
+      "y": 280,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 9,
+      "name": "NAND3",
+      "type": "NAND",
+      "x": 620,
+      "y": 140,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 10,
+      "name": "NAND4",
+      "type": "NAND",
+      "x": 620,
+      "y": 280,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 11,
+      "name": "NAND5",
+      "type": "NAND",
+      "x": 820,
+      "y": 140,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 12,
+      "name": "NAND6",
+      "type": "NAND",
+      "x": 820,
+      "y": 280,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 13,
+      "name": "NAND7",
+      "type": "NAND",
+      "x": 1000,
+      "y": 140,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 14,
+      "name": "NAND8",
+      "type": "NAND",
+      "x": 1000,
+      "y": 280,
+      "inputs": 2,
+      "size": 4.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 15,
+      "name": "INV4",
+      "type": "INV",
+      "x": 660,
+      "y": 420,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 17,
+      "name": "OUT",
+      "type": "OUTPUT",
+      "x": 1140,
+      "y": 140,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 18,
+      "name": "OUT",
+      "type": "OUTPUT",
+      "x": 1140,
+      "y": 280,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    }
+  ],
+  "wires": [
+    {
+      "from_id": 2,
+      "to_id": 1,
+      "to_pin": 0
+    },
+    {
+      "from_id": 3,
+      "to_id": 4,
+      "to_pin": 0
+    },
+    {
+      "from_id": 1,
+      "to_id": 5,
+      "to_pin": 0
+    },
+    {
+      "from_id": 1,
+      "to_id": 6,
+      "to_pin": 0
+    },
+    {
+      "from_id": 5,
+      "to_id": 7,
+      "to_pin": 1
+    },
+    {
+      "from_id": 4,
+      "to_id": 7,
+      "to_pin": 0
+    },
+    {
+      "from_id": 4,
+      "to_id": 6,
+      "to_pin": 1
+    },
+    {
+      "from_id": 6,
+      "to_id": 9,
+      "to_pin": 0
+    },
+    {
+      "from_id": 7,
+      "to_id": 10,
+      "to_pin": 1
+    },
+    {
+      "from_id": 10,
+      "to_id": 9,
+      "to_pin": 1
+    },
+    {
+      "from_id": 9,
+      "to_id": 10,
+      "to_pin": 0
+    },
+    {
+      "from_id": 9,
+      "to_id": 11,
+      "to_pin": 0
+    },
+    {
+      "from_id": 15,
+      "to_id": 12,
+      "to_pin": 0
+    },
+    {
+      "from_id": 15,
+      "to_id": 11,
+      "to_pin": 1
+    },
+    {
+      "from_id": 10,
+      "to_id": 12,
+      "to_pin": 1
+    },
+    {
+      "from_id": 12,
+      "to_id": 14,
+      "to_pin": 1
+    },
+    {
+      "from_id": 11,
+      "to_id": 13,
+      "to_pin": 0
+    },
+    {
+      "from_id": 13,
+      "to_id": 14,
+      "to_pin": 0
+    },
+    {
+      "from_id": 14,
+      "to_id": 13,
+      "to_pin": 1
+    },
+    {
+      "from_id": 4,
+      "to_id": 15,
+      "to_pin": 0
+    },
+    {
+      "from_id": 13,
+      "to_id": 17,
+      "to_pin": 0
+    },
+    {
+      "from_id": 14,
+      "to_id": 18,
+      "to_pin": 0
+    }
+  ]
+}

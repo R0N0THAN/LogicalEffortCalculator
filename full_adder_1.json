@@ -1,0 +1,224 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "name": "INV1",
+      "type": "INV",
+      "x": 220,
+      "y": 160,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": true
+    },
+    {
+      "id": 2,
+      "name": "INV2",
+      "type": "INV",
+      "x": 220,
+      "y": 240,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": true
+    },
+    {
+      "id": 3,
+      "name": "INV3",
+      "type": "INV",
+      "x": 220,
+      "y": 320,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": true
+    },
+    {
+      "id": 4,
+      "name": "A",
+      "type": "INPUT",
+      "x": 120,
+      "y": 160,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 5,
+      "name": "B",
+      "type": "INPUT",
+      "x": 120,
+      "y": 240,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 6,
+      "name": "Cin",
+      "type": "INPUT",
+      "x": 120,
+      "y": 320,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 7,
+      "name": "XOR1",
+      "type": "XOR",
+      "x": 500,
+      "y": 180,
+      "inputs": 2,
+      "size": 18.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 8,
+      "name": "NAND1",
+      "type": "NAND",
+      "x": 440,
+      "y": 300,
+      "inputs": 2,
+      "size": 12.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 10,
+      "name": "XOR2",
+      "type": "XOR",
+      "x": 740,
+      "y": 200,
+      "inputs": 2,
+      "size": 45.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 11,
+      "name": "NAND2",
+      "type": "NAND",
+      "x": 720,
+      "y": 340,
+      "inputs": 2,
+      "size": 12.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 13,
+      "name": "NAND3",
+      "type": "NAND",
+      "x": 880,
+      "y": 300,
+      "inputs": 2,
+      "size": 12.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 14,
+      "name": "Sum",
+      "type": "OUTPUT",
+      "x": 1020,
+      "y": 200,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    },
+    {
+      "id": 15,
+      "name": "C_out",
+      "type": "OUTPUT",
+      "x": 1020,
+      "y": 300,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0,
+      "locked": false
+    }
+  ],
+  "wires": [
+    {
+      "from_id": 4,
+      "to_id": 1,
+      "to_pin": 0
+    },
+    {
+      "from_id": 5,
+      "to_id": 2,
+      "to_pin": 0
+    },
+    {
+      "from_id": 6,
+      "to_id": 3,
+      "to_pin": 0
+    },
+    {
+      "from_id": 1,
+      "to_id": 7,
+      "to_pin": 0
+    },
+    {
+      "from_id": 2,
+      "to_id": 7,
+      "to_pin": 1
+    },
+    {
+      "from_id": 1,
+      "to_id": 8,
+      "to_pin": 0
+    },
+    {
+      "from_id": 2,
+      "to_id": 8,
+      "to_pin": 1
+    },
+    {
+      "from_id": 7,
+      "to_id": 10,
+      "to_pin": 0
+    },
+    {
+      "from_id": 3,
+      "to_id": 10,
+      "to_pin": 1
+    },
+    {
+      "from_id": 7,
+      "to_id": 11,
+      "to_pin": 0
+    },
+    {
+      "from_id": 3,
+      "to_id": 11,
+      "to_pin": 1
+    },
+    {
+      "from_id": 11,
+      "to_id": 13,
+      "to_pin": 1
+    },
+    {
+      "from_id": 8,
+      "to_id": 13,
+      "to_pin": 0
+    },
+    {
+      "from_id": 10,
+      "to_id": 14,
+      "to_pin": 0
+    },
+    {
+      "from_id": 13,
+      "to_id": 15,
+      "to_pin": 0
+    }
+  ]
+}
