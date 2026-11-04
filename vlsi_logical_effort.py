@@ -787,6 +787,7 @@ class TransistorSchematicWindow(tk.Toplevel):
 # =====================================================================
 class SchematicCanvas(tk.Canvas):
     GRID_SIZE = 20
+    ROUTING_GRID_SIZE = 10
 
     def __init__(self, master, **kwargs):
         super().__init__(master, bg="#1e1e2e", highlightthickness=0, **kwargs)
@@ -807,6 +808,8 @@ class SchematicCanvas(tk.Canvas):
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.pan_start = None
+        self._route_cache_key = None
+        self._route_cache_value = None
 
         self.selected_node_id = None
         self.wiring_start_pin = None
@@ -872,7 +875,8 @@ class SchematicCanvas(tk.Canvas):
             self.pan_x += dx
             self.pan_y += dy
             self.pan_start = (event.x, event.y)
-            self.render()
+            self.move("schematic", dx, dy)
+            self.draw_grid()
 
     def zoom_at(self, sx, sy, factor):
         new_zoom = max(0.3, min(3.0, self.zoom * factor))
@@ -980,19 +984,21 @@ class SchematicCanvas(tk.Canvas):
         x, y = node['x'], node['y']
         gtype = node['type']
         n_in = node['inputs']
-        height = max(60, n_in * 20)
 
         in_pins = []
         if n_in == 1:
-            in_pins.append((x - 40, y))
-        else:
-            spacing = height / (n_in + 1)
+            in_pins.append((round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                             round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
+        elif n_in > 1:
             for i in range(n_in):
-                in_pins.append((x - 40, y - (height / 2) + spacing * (i + 1)))
+                pin_y = y + (i - (n_in - 1) / 2) * self.ROUTING_GRID_SIZE * 2
+                in_pins.append((round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                                round(pin_y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
 
         out_pins = []
         if gtype != 'OUTPUT':
-            out_pins.append((x + 40, y))
+            out_pins.append((round((x + 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                             round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
 
         return in_pins, out_pins
 
@@ -1088,7 +1094,7 @@ class SchematicCanvas(tk.Canvas):
             wx, wy = self.to_world(event.x, event.y)
             node['x'] = self.snap(wx)
             node['y'] = self.snap(wy)
-            self.render()
+            self.render(route_wires=False)
 
     def on_release(self, event):
         if self.is_drawing_path:
@@ -1111,6 +1117,8 @@ class SchematicCanvas(tk.Canvas):
 
             self.wiring_start_pin = None
             self.render()
+        elif self.selected_node_id is not None:
+            self.render()
 
     def on_mouse_move(self, event):
         if self.is_drawing_path:
@@ -1118,72 +1126,128 @@ class SchematicCanvas(tk.Canvas):
         pin = self.find_pin_at(event.x, event.y)
         self.config(cursor="hand2" if pin else "arrow")
 
-    def route_wire_a_star(self, start_pos, end_pos, occupied_wire_cells):
-        sx, sy = self.snap(start_pos[0]), self.snap(start_pos[1])
-        ex, ey = self.snap(end_pos[0]), self.snap(end_pos[1])
+    def route_wire_a_star(self, start_pos, end_pos, occupied_wire_edges, source_id, target_id):
+        grid = self.ROUTING_GRID_SIZE
+        sx, sy = round(start_pos[0] / grid) * grid, round(start_pos[1] / grid) * grid
+        ex, ey = round(end_pos[0] / grid) * grid, round(end_pos[1] / grid) * grid
+        net_id = source_id
 
         obstacles = set()
-        padding = 10
-        for nid, node in self.nodes.items():
-            nx, ny = node['x'], node['y']
-            h_h = max(25, node['inputs'] * 10)
-            for ox in range(self.snap(nx - 35 - padding), self.snap(nx + 35 + padding) + 1, self.GRID_SIZE):
-                for oy in range(self.snap(ny - h_h - padding), self.snap(ny + h_h + padding) + 1, self.GRID_SIZE):
-                    obstacles.add((ox, oy))
+        padding = 0
 
-        for dx in (-self.GRID_SIZE, 0, self.GRID_SIZE):
-            for dy in (-self.GRID_SIZE, 0, self.GRID_SIZE):
-                obstacles.discard((sx + dx, sy + dy))
-                obstacles.discard((ex + dx, ey + dy))
+        def add_node_obstacle(nid, node, left, right, top, bottom, margin=padding):
+            nx, ny = node['x'], node['y']
+            min_x = math.ceil((nx - left - margin) / grid) * grid
+            max_x = math.floor((nx + right + margin) / grid) * grid
+            min_y = math.ceil((ny - top - margin) / grid) * grid
+            max_y = math.floor((ny + bottom + margin) / grid) * grid
+            node_obstacles = {
+                (ox, oy)
+                for ox in range(min_x, max_x + grid, grid)
+                for oy in range(min_y, max_y + grid, grid)
+            }
+            if nid == source_id:
+                lead_steps = max(1, math.floor((right + margin - 40) / grid) + 1)
+                for step in range(lead_steps + 1):
+                    node_obstacles.discard((sx + step * grid, sy))
+            if nid == target_id:
+                lead_steps = max(1, math.floor((left + margin - 40) / grid) + 2)
+                for step in range(lead_steps + 1):
+                    node_obstacles.discard((ex - step * grid, ey))
+            obstacles.update(node_obstacles)
+
+        for nid, node in self.nodes.items():
+            gtype = node['type']
+            if gtype == 'INPUT':
+                half_width = max(20, len(node.get('name', '')) * 4 + 6)
+                add_node_obstacle(nid, node, half_width, half_width, 15, 15)
+            elif gtype == 'OUTPUT':
+                label = f"{node.get('name', 'OUT')} ({node.get('cl', 120.0)}C)"
+                half_width = max(35, len(label) * 3.5 + 8)
+                add_node_obstacle(nid, node, half_width, half_width, 15, 15)
+            else:
+                gate_height = max(50, (node['inputs'] - 1) * grid * 2 + 30)
+                add_node_obstacle(nid, node, 42, 32, gate_height / 2, gate_height / 2)
 
         open_set = []
-        heapq.heappush(open_set, (0, 0, sx, sy, None))
+        start_state = (sx, sy, 0, 0)
+        heapq.heappush(open_set, (0, 0, *start_state))
         came_from = {}
-        g_score = {(sx, sy): 0}
-        dirs = [(self.GRID_SIZE, 0), (-self.GRID_SIZE, 0), (0, self.GRID_SIZE), (0, -self.GRID_SIZE)]
+        g_score = {start_state: 0}
+        dirs = [(grid, 0), (-grid, 0), (0, grid), (0, -grid)]
+        if (sx, sy) == (ex, ey):
+            return [(sx, sy)]
 
-        found = False
-        target = (ex, ey)
-        steps = 0
+        bounds = [node for node in self.nodes.values()]
+        margin = max(300, len(bounds) * grid * 2)
+        min_x = min([sx, ex] + [n['x'] for n in bounds]) - margin
+        max_x = max([sx, ex] + [n['x'] for n in bounds]) + margin
+        min_y = min([sy, ey] + [n['y'] for n in bounds]) - margin
+        max_y = max([sy, ey] + [n['y'] for n in bounds]) + margin
+        target_state = None
 
-        while open_set and steps < 1200:
-            steps += 1
-            f, g, cx, cy, cur_dir = heapq.heappop(open_set)
+        def edge_key(a, b):
+            return (a, b) if a < b else (b, a)
 
-            if (cx, cy) == target:
-                found = True
+        blocked_wire_edges = set()
+        same_net_wire_edges = set()
+        crossing_penalties = {}
+        for edge, owners in occupied_wire_edges.items():
+            if any(owner != net_id for owner in owners):
+                blocked_wire_edges.add(edge)
+                edge_is_horizontal = edge[0][1] == edge[1][1]
+                for point in edge:
+                    key = (point, not edge_is_horizontal)
+                    crossing_penalties[key] = crossing_penalties.get(key, 0) + 240
+            elif owners:
+                same_net_wire_edges.add(edge)
+
+        while open_set:
+            _, g, cx, cy, prev_dx, prev_dy = heapq.heappop(open_set)
+            state = (cx, cy, prev_dx, prev_dy)
+            if g != g_score.get(state):
+                continue
+            if (cx, cy) == (ex, ey) and (prev_dx, prev_dy) == (grid, 0):
+                target_state = state
                 break
 
             for dx, dy in dirs:
+                if prev_dx == 0 and prev_dy == 0 and (dx, dy) != (grid, 0):
+                    continue
                 nx, ny = cx + dx, cy + dy
-                if (nx, ny) in obstacles and (nx, ny) != target:
+                if not (min_x <= nx <= max_x and min_y <= ny <= max_y):
+                    continue
+                if (nx, ny) in obstacles and (nx, ny) != (ex, ey):
                     continue
 
-                turn_cost = 8 if (cur_dir and cur_dir != (dx, dy)) else 0
-                wire_penalty = 120 if (nx, ny) in occupied_wire_cells else 0
+                edge = edge_key((cx, cy), (nx, ny))
+                if edge in blocked_wire_edges:
+                    continue
 
-                new_g = g + self.GRID_SIZE + turn_cost + wire_penalty
+                turn_cost = 12 if (prev_dx, prev_dy) not in ((0, 0), (dx, dy)) else 0
+                overlap_cost = 30 if edge in same_net_wire_edges else 0
+                crossing_cost = crossing_penalties.get(((nx, ny), dx != 0), 0)
+                new_g = g + self.GRID_SIZE + turn_cost + overlap_cost + crossing_cost
+                next_state = (nx, ny, dx, dy)
 
-                if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
-                    g_score[(nx, ny)] = new_g
-                    h = abs(nx - ex) + abs(ny - ey)
-                    heapq.heappush(open_set, (new_g + h, new_g, nx, ny, (dx, dy)))
-                    came_from[(nx, ny)] = (cx, cy)
+                if new_g < g_score.get(next_state, math.inf):
+                    g_score[next_state] = new_g
+                    h = (abs(nx - ex) + abs(ny - ey)) * self.GRID_SIZE / grid
+                    heapq.heappush(open_set, (new_g + h, new_g, *next_state))
+                    came_from[next_state] = state
 
-        if found:
+        if target_state is not None:
             path = []
-            curr = target
+            curr = target_state
             while curr in came_from:
-                path.append(curr)
+                path.append((curr[0], curr[1]))
                 curr = came_from[curr]
             path.append((sx, sy))
             path.reverse()
             return simplify_path(path)
-        else:
-            mx = (sx + ex) / 2
-            return simplify_path([(sx, sy), (mx, sy), (mx, ey), (ex, ey)])
+        return None
 
-    def render(self):
+    def render(self, route_wires=True):
         self.delete("schematic")
         self.draw_grid()
 
@@ -1193,40 +1257,90 @@ class SchematicCanvas(tk.Canvas):
         crit_nodes = set(active_path) if self.highlight_path or self.is_drawing_path else set()
         crit_wire_tuples = set(zip(active_path[:-1], active_path[1:])) if self.highlight_path or self.is_drawing_path else set()
 
-        routed_world_paths = []
-        occupied_wire_cells = set()
+        route_signature = (
+            tuple(
+                (nid, node['type'], node['x'], node['y'], node['inputs'],
+                 node.get('name'), node.get('cl'))
+                for nid, node in self.nodes.items()
+            ),
+            tuple(
+                (wire['from_id'], wire['to_id'], wire['to_pin'])
+                for wire in self.wires
+            )
+        )
+        if not route_wires:
+            cached_routes = ()
+            net_adjacency = {}
+            unrouted_wire_ids = []
+        elif route_signature == self._route_cache_key:
+            cached_routes, net_adjacency, cached_unrouted = self._route_cache_value
+            unrouted_wire_ids = list(cached_unrouted)
+        else:
+            cached_routes = []
+            occupied_wire_edges = {}
+            net_adjacency = {}
+            unrouted_wire_ids = []
 
-        for w_idx, wire in enumerate(self.wires):
-            from_node = self.nodes.get(wire['from_id'])
-            to_node = self.nodes.get(wire['to_id'])
-            if from_node and to_node:
-                _, out_pins = self.get_pin_positions(from_node)
-                in_pins, _ = self.get_pin_positions(to_node)
+            for w_idx, wire in enumerate(self.wires):
+                from_node = self.nodes.get(wire['from_id'])
+                to_node = self.nodes.get(wire['to_id'])
+                if from_node and to_node:
+                    _, out_pins = self.get_pin_positions(from_node)
+                    in_pins, _ = self.get_pin_positions(to_node)
 
-                if out_pins and wire['to_pin'] < len(in_pins):
-                    start_pos = out_pins[0]
-                    end_pos = in_pins[wire['to_pin']]
-                    
-                    path = self.route_wire_a_star(start_pos, end_pos, occupied_wire_cells)
-                    is_critical = (wire['from_id'], wire['to_id']) in crit_wire_tuples
-                    routed_world_paths.append((w_idx, path, is_critical))
+                    if out_pins and wire['to_pin'] < len(in_pins):
+                        start_pos = out_pins[0]
+                        end_pos = in_pins[wire['to_pin']]
+                        net_id = wire['from_id']
+                        path = self.route_wire_a_star(
+                            start_pos, end_pos, occupied_wire_edges, wire['from_id'], wire['to_id']
+                        )
+                        if path is None:
+                            unrouted_wire_ids.append(w_idx + 1)
+                            continue
+                        cached_routes.append((w_idx, tuple(path), net_id))
 
-                    for pt in path:
-                        occupied_wire_cells.add(pt)
+                        for p1, p2 in zip(path, path[1:]):
+                            grid = self.ROUTING_GRID_SIZE
+                            dx = 0 if p1[0] == p2[0] else (grid if p2[0] > p1[0] else -grid)
+                            dy = 0 if p1[1] == p2[1] else (grid if p2[1] > p1[1] else -grid)
+                            point = p1
+                            while point != p2:
+                                next_point = (point[0] + dx, point[1] + dy)
+                                edge = (point, next_point) if point < next_point else (next_point, point)
+                                occupied_wire_edges.setdefault(edge, set()).add(net_id)
+                                net_adjacency.setdefault(net_id, {}).setdefault(point, set()).add(next_point)
+                                net_adjacency.setdefault(net_id, {}).setdefault(next_point, set()).add(point)
+                                point = next_point
+
+            self._route_cache_key = route_signature
+            self._route_cache_value = (tuple(cached_routes), net_adjacency, tuple(unrouted_wire_ids))
+
+        routed_world_paths = [
+            (w_idx, path, (self.wires[w_idx]['from_id'], self.wires[w_idx]['to_id']) in crit_wire_tuples, net_id)
+            for w_idx, path, net_id in cached_routes
+        ]
 
         screen_h_segments = []
         screen_v_segments = []
 
-        for w_idx, w_path, is_critical in routed_world_paths:
+        for w_idx, w_path, is_critical, net_id in routed_world_paths:
             s_path = [self.to_screen(px, py) for px, py in w_path]
             for i in range(len(s_path) - 1):
                 p1, p2 = s_path[i], s_path[i+1]
                 if abs(p1[1] - p2[1]) < 1:
-                    screen_h_segments.append({'x1': p1[0], 'x2': p2[0], 'y': p1[1], 'wire_idx': w_idx, 'is_crit': is_critical})
+                    screen_h_segments.append({'x1': p1[0], 'x2': p2[0], 'y': p1[1], 'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical})
                 elif abs(p1[0] - p2[0]) < 1:
-                    screen_v_segments.append({'x': p1[0], 'y1': p1[1], 'y2': p2[1], 'wire_idx': w_idx, 'is_crit': is_critical})
+                    screen_v_segments.append({'x': p1[0], 'y1': p1[1], 'y2': p2[1], 'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical})
 
-        def draw_horizontal_with_bridges(x1, x2, y, wire_idx, is_critical):
+        connected_junctions = {
+            self.to_screen(x, y)
+            for adjacency in net_adjacency.values()
+            for (x, y), neighbors in adjacency.items()
+            if len(neighbors) >= 3
+        }
+
+        def draw_horizontal_with_bridges(x1, x2, y, wire_idx, net_id, is_critical):
             start_x, end_x = min(x1, x2), max(x1, x2)
             if abs(start_x - end_x) < 2:
                 return
@@ -1236,7 +1350,10 @@ class SchematicCanvas(tk.Canvas):
                 if v['wire_idx'] != wire_idx:
                     v_y1, v_y2 = min(v['y1'], v['y2']), max(v['y1'], v['y2'])
                     if start_x + 2 < v['x'] < end_x - 2 and v_y1 - 2 <= y <= v_y2 + 2:
-                        crossings.append(v['x'])
+                        if net_id == v['net_id']:
+                            connected_junctions.add((v['x'], y))
+                        else:
+                            crossings.append(v['x'])
 
             crossings.sort()
             r = max(4, min(10, int(6 * self.zoom)))
@@ -1262,7 +1379,14 @@ class SchematicCanvas(tk.Canvas):
             self.create_line(v['x'], v['y1'], v['x'], v['y2'], fill=color, width=w_stroke, tags="schematic")
 
         for h in screen_h_segments:
-            draw_horizontal_with_bridges(h['x1'], h['x2'], h['y'], h['wire_idx'], h['is_crit'])
+            draw_horizontal_with_bridges(
+                h['x1'], h['x2'], h['y'], h['wire_idx'], h['net_id'], h['is_crit']
+            )
+
+        for x, y in connected_junctions:
+            radius = max(3, int(4 * self.zoom))
+            self.create_oval(x - radius, y - radius, x + radius, y + radius,
+                             fill="#89b4fa", outline="#89b4fa", tags="schematic")
 
         for nid, node in self.nodes.items():
             wx, wy = node['x'], node['y']
@@ -1296,12 +1420,12 @@ class SchematicCanvas(tk.Canvas):
                                     fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_oval(x+s15, y-4*self.zoom, x+s15+8*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype == 'NAND':
-                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
+                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
                 self.create_rectangle(x-s30, y-height/2, x, y+height/2, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_arc(x-25*self.zoom, y-height/2, x+20*self.zoom, y+height/2, start=-90, extent=180, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_oval(x+20*self.zoom, y-4*self.zoom, x+28*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype == 'NOR':
-                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
+                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
                 top_y = y - height / 2
                 bot_y = y + height / 2
                 self.create_polygon(
@@ -1315,7 +1439,7 @@ class SchematicCanvas(tk.Canvas):
                 )
                 self.create_oval(x+18*self.zoom, y-4*self.zoom, x+26*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype in ('XOR', 'XNOR'):
-                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
+                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
                 top_y = y - height / 2
                 bot_y = y + height / 2
                 self.create_arc(x-42*self.zoom, top_y, x-26*self.zoom, bot_y, start=-90, extent=180, style=tk.ARC, outline=outline_color, width=wire_width, tags="schematic")
@@ -1342,7 +1466,11 @@ class SchematicCanvas(tk.Canvas):
 
             if gtype not in ('INPUT', 'OUTPUT'):
                 lbl = f"[Stage {stg}] {name} (Cin={node['size']:.1f}C)"
-                self.create_text(x, y - max(30*self.zoom, node['inputs']*10*self.zoom), text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
+                label_offset = max(
+                    (((node['inputs'] - 1) * 20 + 30) / 2 + 20) * self.zoom,
+                    node['inputs'] * 10 * self.zoom
+                )
+                self.create_text(x, y - label_offset, text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
 
             in_pins, out_pins = self.get_pin_positions(node)
             pin_labels = self.get_pin_labels(node)
@@ -1353,12 +1481,23 @@ class SchematicCanvas(tk.Canvas):
                 
                 if idx < len(pin_labels) and gtype not in ('INPUT', 'OUTPUT'):
                     lbl_text = pin_labels[idx]
-                    self.create_text(spx - 8 * self.zoom, spy, text=lbl_text, fill="#f5c2e7", 
-                                     font=("Arial", max(6, int(8 * self.zoom)), "bold"), anchor="e", tags="schematic")
+                    self.create_text(spx - 4 * self.zoom, spy - 7 * self.zoom, text=lbl_text, fill="#f5c2e7",
+                                     font=("Arial", max(6, int(8 * self.zoom)), "bold"), anchor="s", tags="schematic")
 
             for px, py in out_pins:
                 spx, spy = self.to_screen(px, py)
                 self.create_oval(spx-4*self.zoom, spy-4*self.zoom, spx+4*self.zoom, spy+4*self.zoom, fill="#a6e3a1", outline="#ffffff", tags="schematic")
+
+        if unrouted_wire_ids:
+            self.create_text(
+                15,
+                max(20, self.winfo_height() - 20),
+                text=f"Unable to route wire(s): {', '.join(map(str, unrouted_wire_ids))}",
+                fill="#f38ba8",
+                font=("Arial", 10, "bold"),
+                anchor="w",
+                tags="schematic"
+            )
 
         if self.is_drawing_path:
             p_names = []
