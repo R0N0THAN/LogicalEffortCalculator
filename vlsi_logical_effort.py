@@ -553,9 +553,20 @@ class TransistorSchematicWindow(tk.Toplevel):
         cin_val = node['size']
         node_name = node.get('name', f"{gtype}{node['id']}")
         stage_str = f" | Stage {stage_num}" if stage_num is not None else ""
+        self.rail_bottom = 520
+        if gtype == 'NAND':
+            nmos_start_y = 250
+            nmos_step = 50
+            self.rail_bottom = max(self.rail_bottom, nmos_start_y + (n_in - 1) * nmos_step + 65)
+        elif gtype == 'NOR':
+            pmos_start_y = 80
+            pmos_step = 62
+            last_pmos_y = pmos_start_y + (n_in - 1) * pmos_step
+            nmos_y = max(380, last_pmos_y + 110)
+            self.rail_bottom = max(self.rail_bottom, nmos_y + 100)
         
         self.title(f"Transistor Schematic - Gate {node_name} ({gtype})")
-        self.geometry("860x680")
+        self.geometry(f"860x{max(680, self.rail_bottom + 150)}")
         self.configure(bg="#11111b")
 
         ttk.Label(self, text=f"CMOS Transistor Level Schematic for Gate {node_name}{stage_str}", 
@@ -607,8 +618,8 @@ class TransistorSchematicWindow(tk.Toplevel):
         c.create_line(50, 40, 780, 40, fill="#f9e2af", width=4)
         c.create_text(70, 25, text="VDD", fill="#f9e2af", font=("Arial", 11, "bold"))
 
-        c.create_line(50, 520, 780, 520, fill="#a6adc8", width=4)
-        c.create_text(70, 535, text="GND", fill="#a6adc8", font=("Arial", 11, "bold"))
+        c.create_line(50, self.rail_bottom, 780, self.rail_bottom, fill="#a6adc8", width=4)
+        c.create_text(70, self.rail_bottom + 15, text="GND", fill="#a6adc8", font=("Arial", 11, "bold"))
 
         if gtype == 'INV':
             wp, wn = 2.0 * x_scale, 1.0 * x_scale
@@ -669,6 +680,106 @@ class TransistorSchematicWindow(tk.Toplevel):
             c.create_line(605, 280, 605, 345, fill="#89b4fa", width=2)
             c.create_line(535, 280, 740, 280, fill="#89b4fa", width=3)
             c.create_text(755, 280, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
+
+        elif gtype in ('NAND', 'NOR'):
+            n_in = max(1, int(n_in))
+            stack_x = 500
+            stack_start_y = 80
+            stack_step = 52
+            output_x = 800
+
+            def input_name(index):
+                if index < 26:
+                    return chr(ord('A') + index)
+                return f"A{index - 25}"
+
+            def draw_input(index, x, y):
+                name = input_name(index)
+                c.create_line(x - 110, y, x - 35, y, fill="#cdd6f4", width=2)
+                c.create_text(x - 115, y, text=f"IN {name}", fill="#cdd6f4",
+                              font=("Arial", 8, "bold"), anchor="e")
+
+            if gtype == 'NAND':
+                pmos_y = 120
+                nmos_stack_start_y = 250
+                nmos_stack_step = 50
+                output_y = nmos_stack_start_y - 15
+                pmos_xs = [
+                    150 + index * 550 / max(n_in - 1, 1)
+                    for index in range(n_in)
+                ]
+                for index, x in enumerate(pmos_xs):
+                    self.draw_pmos(x, pmos_y, 2.0 * x_scale, f"Mp{index + 1}")
+                    draw_input(index, x, pmos_y)
+                    c.create_line(x + 15, 40, x + 15, pmos_y - 15,
+                                  fill="#f9e2af", width=2)
+                    c.create_line(x + 15, pmos_y + 15, x + 15, output_y,
+                                  fill="#f38ba8", width=2)
+
+                c.create_line(pmos_xs[0] + 15, output_y, output_x, output_y,
+                              fill="#89b4fa", width=2)
+                for index in range(n_in):
+                    y = nmos_stack_start_y + index * nmos_stack_step
+                    self.draw_nmos(stack_x, y, n_in * x_scale, f"Mn{index + 1}")
+                    draw_input(index, stack_x, y)
+                    if index < n_in - 1:
+                        next_y = nmos_stack_start_y + (index + 1) * nmos_stack_step
+                        c.create_line(stack_x + 15, y + 15, stack_x + 15, next_y - 15,
+                                      fill="#89b4fa", width=2)
+                    else:
+                        c.create_line(stack_x + 15, y + 15, stack_x + 15, self.rail_bottom,
+                                      fill="#a6adc8", width=2)
+
+                c.create_line(stack_x + 15, nmos_stack_start_y - 15,
+                              output_x, nmos_stack_start_y - 15, fill="#89b4fa", width=2)
+                c.create_line(output_x, nmos_stack_start_y - 15, output_x, output_y,
+                              fill="#89b4fa", width=2)
+                c.create_text(output_x + 10, output_y, text="OUT", fill="#89b4fa",
+                              font=("Arial", 10, "bold"), anchor="w")
+            else:
+                pmos_stack_start_y = 80
+                pmos_stack_step = 62
+                last_pmos_y = pmos_stack_start_y + (n_in - 1) * pmos_stack_step
+                nmos_y = max(380, last_pmos_y + 110)
+                output_y = nmos_y - 60
+                ground_bus_y = nmos_y + 55
+                nmos_xs = [
+                    150 + index * 550 / max(n_in - 1, 1)
+                    for index in range(n_in)
+                ]
+                for index, x in enumerate(nmos_xs):
+                    self.draw_nmos(x, nmos_y, x_scale, f"Mn{index + 1}")
+                    draw_input(index, x, nmos_y)
+                    c.create_line(x + 15, nmos_y - 15, x + 15, output_y,
+                                  fill="#89b4fa", width=2)
+                    c.create_line(x + 15, nmos_y + 15, x + 15, ground_bus_y,
+                                  fill="#a6adc8", width=2)
+
+                c.create_line(nmos_xs[0] + 15, output_y, output_x, output_y,
+                              fill="#89b4fa", width=2)
+                c.create_line(nmos_xs[0] + 15, ground_bus_y, nmos_xs[-1] + 15, ground_bus_y,
+                              fill="#a6adc8", width=2)
+                c.create_line(nmos_xs[0] + 15, ground_bus_y, nmos_xs[0] + 15, self.rail_bottom,
+                              fill="#a6adc8", width=2)
+
+                for index in range(n_in):
+                    y = pmos_stack_start_y + index * pmos_stack_step
+                    self.draw_pmos(stack_x, y, 2.0 * n_in * x_scale, f"Mp{index + 1}")
+                    draw_input(index, stack_x, y)
+                    if index == 0:
+                        c.create_line(stack_x + 15, 40, stack_x + 15, y - 15,
+                                      fill="#f9e2af", width=2)
+                    else:
+                        previous_y = pmos_stack_start_y + (index - 1) * pmos_stack_step
+                        c.create_line(stack_x + 15, previous_y + 15, stack_x + 15, y - 15,
+                                      fill="#f38ba8", width=2)
+
+                c.create_line(stack_x + 15, last_pmos_y + 15,
+                              stack_x + 15, output_y, fill="#89b4fa", width=2)
+                c.create_line(stack_x + 15, output_y, output_x, output_y,
+                              fill="#89b4fa", width=2)
+                c.create_text(output_x + 10, output_y, text="OUT", fill="#89b4fa",
+                              font=("Arial", 10, "bold"), anchor="w")
 
 
 # =====================================================================
@@ -1299,7 +1410,7 @@ class VLSIWorkbenchApp(tk.Tk):
         
         ttk.Label(row1, text="Inputs (N):").pack(side=tk.LEFT, padx=(6, 2))
         self.inputs_spin = ttk.Spinbox(row1, from_=2, to=8, width=3)
-        self.inputs_spin.set(3)
+        self.inputs_spin.set(2)
         self.inputs_spin.pack(side=tk.LEFT, padx=2)
 
         ttk.Button(row1, text="+ NAND", command=lambda: self.add_gate('NAND')).pack(side=tk.LEFT, padx=2)
