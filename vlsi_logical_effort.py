@@ -77,7 +77,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     input_nodes = [n for n in graph_data['nodes'] if n['type'] == 'INPUT']
 
     empty_summary = {
-        "pre_sizing_worst_D": 0.0,
+        "pre_sizing_D": 0.0,
         "ideal_D": 0.0,
         "actual_D": 0.0,
         "N_opt": 0.0,
@@ -390,7 +390,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N_opt_int = round(N_opt)
 
     summary = {
-        "pre_sizing_worst_D": evaluated_paths[0]['D_ideal'],
+        "pre_sizing_D": target_eval['D_ideal'],
         "ideal_D": ideal_D,
         "actual_D": actual_D,
         "N_opt": N_opt,
@@ -1644,7 +1644,7 @@ class VLSIWorkbenchApp(tk.Tk):
         else:
             self.path_combo.current(0)
 
-        self.lbl_ideal_d.config(text=f"{summary.get('pre_sizing_worst_D', 0.0):.3f} τ")
+        self.lbl_ideal_d.config(text=f"{summary.get('pre_sizing_D', 0.0):.3f} τ")
         self.lbl_actual_d.config(text=f"{summary.get('actual_D', 0.0):.3f} τ")
         self.lbl_n_opt.config(text=f"{summary.get('N_opt_int', 0)} stages ({summary.get('N_opt', 0.0):.2f})")
 
