@@ -79,7 +79,14 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     output_nodes = [n for n in graph_data['nodes'] if n['type'] == 'OUTPUT']
     input_nodes = [n for n in graph_data['nodes'] if n['type'] == 'INPUT']
 
-    empty_summary = {"ideal_D": 0.0, "actual_D": 0.0, "N_opt": 0.0, "N_opt_int": 0, "critical_full_path": []}
+    empty_summary = {
+        "pre_sizing_worst_D": 0.0,
+        "ideal_D": 0.0,
+        "actual_D": 0.0,
+        "N_opt": 0.0,
+        "N_opt_int": 0,
+        "critical_full_path": []
+    }
     if not logic_nodes:
         return empty_summary, "No logic gates found in schematic.", {}, ["[Auto: No paths found]"]
 
@@ -294,11 +301,13 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
     max_iters = 50
     converged = False
+    oscillation_resolved = False
     iters_run = 0
     G, B, H, F, P = (target_eval[key] for key in ('G', 'B', 'H', 'F', 'P'))
     f_hat_target = F ** (1.0 / N) if N > 0 else 0.0
     ideal_D = target_eval['D_ideal']
     fixed_input_cin = {nid: current_cin[nid] for nid in direct_input_gate_ids}
+    sizing_history = []
 
     def get_gate_output_cap(nid, cin_values):
         output_cap = 0.0
@@ -339,11 +348,24 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         rounded_F = math.prod(stage_efforts)
         new_f_hat = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
         ideal_D = N * new_f_hat + P
-        current_cin = new_cin
 
         if math.isclose(new_f_hat, f_hat_target, rel_tol=1e-6, abs_tol=1e-6):
+            current_cin = new_cin
             converged = True
             break
+
+        state = tuple(new_cin[nid] for nid in rev_topo_logic_nodes)
+        if len(sizing_history) >= 2 and state == sizing_history[-2][0] and state != sizing_history[-1][0]:
+            previous_effort, previous_cin = sizing_history[-1][1], sizing_history[-1][2]
+            if rounded_F < previous_effort:
+                current_cin = new_cin
+            else:
+                current_cin = previous_cin
+            oscillation_resolved = True
+            break
+
+        sizing_history.append((state, rounded_F, new_cin.copy()))
+        current_cin = new_cin
         f_hat_target = new_f_hat
 
     final_stage_f = get_path_stage_efforts(current_cin)
@@ -371,6 +393,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N_opt_int = round(N_opt)
 
     summary = {
+        "pre_sizing_worst_D": evaluated_paths[0]['D_ideal'],
         "ideal_D": ideal_D,
         "actual_D": actual_D,
         "N_opt": N_opt,
@@ -394,7 +417,14 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append(f"2. Logic Gates Path: {' -> '.join(path_names)}")
 
     lines.append(f"\n3. Convergence:")
-    lines.append(f"   Iterative Sizing Status : {'CONVERGED' if converged else 'MAX ITERS REACHED'}")
+    sizing_status = (
+        "OSCILLATION RESOLVED (LOWER-EFFORT STATE)"
+        if oscillation_resolved
+        else "CONVERGED" if converged else "MAX ITERS REACHED"
+    )
+    lines.append(f"   Iterative Sizing Status : {sizing_status}")
+    if oscillation_resolved:
+        lines.append("   Two-state cycle detected; selected the state with lower total path effort.")
     lines.append(f"   Total Iterations        : {iters_run}")
 
     lines.append("\n4. Final Path Efforts & Branching:")
@@ -1622,7 +1652,7 @@ class VLSIWorkbenchApp(tk.Tk):
         else:
             self.path_combo.current(0)
 
-        self.lbl_ideal_d.config(text=f"{summary.get('ideal_D', 0.0):.3f} τ")
+        self.lbl_ideal_d.config(text=f"{summary.get('pre_sizing_worst_D', 0.0):.3f} τ")
         self.lbl_actual_d.config(text=f"{summary.get('actual_D', 0.0):.3f} τ")
         self.lbl_n_opt.config(text=f"{summary.get('N_opt_int', 0)} stages ({summary.get('N_opt', 0.0):.2f})")
 

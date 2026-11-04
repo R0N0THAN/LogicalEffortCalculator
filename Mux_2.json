@@ -1,0 +1,352 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "name": "D1",
+      "type": "INPUT",
+      "x": 80,
+      "y": 140,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 2,
+      "name": "D2",
+      "type": "INPUT",
+      "x": 80,
+      "y": 240,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 3,
+      "name": "D3",
+      "type": "INPUT",
+      "x": 80,
+      "y": 340,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 4,
+      "name": "D4",
+      "type": "INPUT",
+      "x": 80,
+      "y": 440,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 6,
+      "name": "B",
+      "type": "INPUT",
+      "x": 80,
+      "y": 640,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 7,
+      "name": "A",
+      "type": "INPUT",
+      "x": 80,
+      "y": 540,
+      "inputs": 0,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 8,
+      "name": "INV1",
+      "type": "INV",
+      "x": 240,
+      "y": 140,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 9,
+      "name": "INV2",
+      "type": "INV",
+      "x": 240,
+      "y": 240,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 10,
+      "name": "INV3",
+      "type": "INV",
+      "x": 240,
+      "y": 340,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 11,
+      "name": "INV4",
+      "type": "INV",
+      "x": 240,
+      "y": 440,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 12,
+      "name": "INV5",
+      "type": "INV",
+      "x": 240,
+      "y": 540,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 13,
+      "name": "INV6",
+      "type": "INV",
+      "x": 240,
+      "y": 640,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 14,
+      "name": "INV7",
+      "type": "INV",
+      "x": 440,
+      "y": 640,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 15,
+      "name": "INV8",
+      "type": "INV",
+      "x": 440,
+      "y": 540,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 21,
+      "name": "OUT",
+      "type": "OUTPUT",
+      "x": 1320,
+      "y": 300,
+      "inputs": 1,
+      "size": 3.0,
+      "cl": 120.0
+    },
+    {
+      "id": 27,
+      "name": "NAND1",
+      "type": "NAND",
+      "x": 660,
+      "y": 140,
+      "inputs": 3,
+      "size": 5.0,
+      "cl": 120.0,
+      "separate_inv": true
+    },
+    {
+      "id": 28,
+      "name": "NAND2",
+      "type": "NAND",
+      "x": 660,
+      "y": 240,
+      "inputs": 3,
+      "size": 5.0,
+      "cl": 120.0,
+      "separate_inv": true
+    },
+    {
+      "id": 29,
+      "name": "NAND3",
+      "type": "NAND",
+      "x": 660,
+      "y": 340,
+      "inputs": 3,
+      "size": 5.0,
+      "cl": 120.0,
+      "separate_inv": true
+    },
+    {
+      "id": 30,
+      "name": "NAND4",
+      "type": "NAND",
+      "x": 660,
+      "y": 440,
+      "inputs": 3,
+      "size": 5.0,
+      "cl": 120.0,
+      "separate_inv": true
+    },
+    {
+      "id": 36,
+      "name": "NAND5",
+      "type": "NAND",
+      "x": 940,
+      "y": 300,
+      "inputs": 4,
+      "size": 12.0,
+      "cl": 120.0,
+      "separate_inv": true
+    },
+    {
+      "id": 37,
+      "name": "INV9",
+      "type": "INV",
+      "x": 1120,
+      "y": 300,
+      "inputs": 1,
+      "size": 30.0,
+      "cl": 120.0,
+      "separate_inv": true
+    }
+  ],
+  "wires": [
+    {
+      "from_id": 6,
+      "to_id": 13,
+      "to_pin": 0
+    },
+    {
+      "from_id": 7,
+      "to_id": 12,
+      "to_pin": 0
+    },
+    {
+      "from_id": 4,
+      "to_id": 11,
+      "to_pin": 0
+    },
+    {
+      "from_id": 3,
+      "to_id": 10,
+      "to_pin": 0
+    },
+    {
+      "from_id": 2,
+      "to_id": 9,
+      "to_pin": 0
+    },
+    {
+      "from_id": 1,
+      "to_id": 8,
+      "to_pin": 0
+    },
+    {
+      "from_id": 13,
+      "to_id": 14,
+      "to_pin": 0
+    },
+    {
+      "from_id": 12,
+      "to_id": 15,
+      "to_pin": 0
+    },
+    {
+      "from_id": 12,
+      "to_id": 27,
+      "to_pin": 1
+    },
+    {
+      "from_id": 13,
+      "to_id": 27,
+      "to_pin": 2
+    },
+    {
+      "from_id": 12,
+      "to_id": 28,
+      "to_pin": 1
+    },
+    {
+      "from_id": 14,
+      "to_id": 28,
+      "to_pin": 2
+    },
+    {
+      "from_id": 15,
+      "to_id": 29,
+      "to_pin": 1
+    },
+    {
+      "from_id": 13,
+      "to_id": 29,
+      "to_pin": 2
+    },
+    {
+      "from_id": 15,
+      "to_id": 30,
+      "to_pin": 1
+    },
+    {
+      "from_id": 14,
+      "to_id": 30,
+      "to_pin": 2
+    },
+    {
+      "from_id": 11,
+      "to_id": 30,
+      "to_pin": 0
+    },
+    {
+      "from_id": 10,
+      "to_id": 29,
+      "to_pin": 0
+    },
+    {
+      "from_id": 9,
+      "to_id": 28,
+      "to_pin": 0
+    },
+    {
+      "from_id": 8,
+      "to_id": 27,
+      "to_pin": 0
+    },
+    {
+      "from_id": 27,
+      "to_id": 36,
+      "to_pin": 0
+    },
+    {
+      "from_id": 28,
+      "to_id": 36,
+      "to_pin": 1
+    },
+    {
+      "from_id": 29,
+      "to_id": 36,
+      "to_pin": 2
+    },
+    {
+      "from_id": 30,
+      "to_id": 36,
+      "to_pin": 3
+    },
+    {
+      "from_id": 36,
+      "to_id": 37,
+      "to_pin": 0
+    },
+    {
+      "from_id": 37,
+      "to_id": 21,
+      "to_pin": 0
+    }
+  ]
+}
