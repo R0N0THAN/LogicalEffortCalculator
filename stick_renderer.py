@@ -32,10 +32,22 @@ def get_gate_stick_layout(node):
         n_sd = ['S' if i % 2 == 0 else 'D' for i in range(nin + 1)]
 
     elif gtype in ('XOR', 'XNOR'):
-        # Separated Inverter Core Model (Inputs: A, A_bar, B, B_bar)
-        inputs = ['A', 'A_bar', 'B', 'B_bar']
-        p_contacts = [{'idx': 0, 'type': 'VDD'}, {'idx': 2, 'type': 'Y'}, {'idx': 4, 'type': 'VDD'}]
-        n_contacts = [{'idx': 0, 'type': 'GND'}, {'idx': 2, 'type': 'Y'}, {'idx': 4, 'type': 'GND'}]
+        inputs = ['A', "A'", "B'", 'B']
+        if gtype == 'XNOR':
+            inputs[2], inputs[3] = inputs[3], inputs[2]
+        p_contacts = [
+            {'idx': 0, 'type': 'VDD'},
+            {'idx': 1, 'type': 'XOR_BRANCH'},
+            {'idx': 2, 'type': 'Y'},
+            {'idx': 3, 'type': 'XOR_BRANCH'},
+            {'idx': 4, 'type': 'VDD'}
+        ]
+        n_contacts = [
+            {'idx': 0, 'type': 'GND_M2'},
+            {'idx': 1, 'type': 'Y'},
+            {'idx': 3, 'type': 'GND'},
+            {'idx': 4, 'type': 'GND_M2'}
+        ]
         p_sd = ['S', 'D/S', 'D', 'D/S', 'S']
         n_sd = ['S', 'D/S', 'D', 'D/S', 'S']
 
@@ -91,6 +103,7 @@ class StickDiagramWindow(tk.Toplevel):
         leg_frame.pack(side=tk.RIGHT, padx=5)
         
         self.create_legend_badge(leg_frame, "Metal-1", "#42a5f5")
+        self.create_legend_badge(leg_frame, "Metal-2", "#ab47bc")
         self.create_legend_badge(leg_frame, "Poly", "#ef5350")
         self.create_legend_badge(leg_frame, "pDIFF", "#ffca28")
         self.create_legend_badge(leg_frame, "nDIFF", "#66bb6a")
@@ -159,13 +172,43 @@ class StickDiagramWindow(tk.Toplevel):
             target_gates = [get_gate_stick_layout(self.logic_nodes[sel_idx - 1])]
 
         c_metal = "#42a5f5"  # Metal-1 Blue
+        c_metal2 = "#ab47bc"  # Metal-2 Purple
         c_poly = "#ef5350"   # Polysilicon Red
         c_pdiff = "#ffca28"  # P-Diff Yellow
         c_ndiff = "#66bb6a"  # N-Diff Green
         c_sd = "#ff7043"     # Source/Drain Orange
 
         start_x = 80
-        for gate in target_gates:
+        gate_widths = [(len(gate['inputs']) + 1) * 90 + 60 for gate in target_gates]
+        rail_end_x = start_x + sum(gate_widths) + 80 * (len(target_gates) - 1)
+
+        # All gates in the schematic share continuous power rails.
+        vx1, vy1 = self.to_screen(start_x, 60)
+        vx2, _ = self.to_screen(rail_end_x, 60)
+        c.create_line(vx1, vy1, vx2, vy1, fill=c_metal, width=max(4, int(6 * self.zoom)))
+        c.create_text(vx2 + 25, vy1, text="VDD", fill="#ffffff", font=("Arial", max(9, int(12 * self.zoom)), "bold"))
+
+        gx1, gy1 = self.to_screen(start_x, 400)
+        gx2, _ = self.to_screen(rail_end_x, 400)
+        c.create_line(gx1, gy1, gx2, gy1, fill=c_metal, width=max(4, int(6 * self.zoom)))
+        c.create_text(gx2 + 25, gy1, text="GND", fill="#ffffff", font=("Arial", max(9, int(12 * self.zoom)), "bold"))
+
+        shared_terminal_indices = set()
+        for gate_index, (left_gate, right_gate) in enumerate(zip(target_gates, target_gates[1:]), start=1):
+            left_last_idx = len(left_gate['inputs'])
+            left_p_terminal = next(
+                (contact['type'] for contact in left_gate['p_contacts'] if contact['idx'] == left_last_idx),
+                None
+            )
+            right_p_terminal = next(
+                (contact['type'] for contact in right_gate['p_contacts'] if contact['idx'] == 0),
+                None
+            )
+            if left_p_terminal == right_p_terminal == 'VDD':
+                shared_terminal_indices.add((gate_index, 'p', 0))
+
+        gate_geometry = []
+        for gate_index, gate in enumerate(target_gates):
             inputs = gate['inputs']
             p_contacts = gate['p_contacts']
             n_contacts = gate['n_contacts']
@@ -187,20 +230,17 @@ class StickDiagramWindow(tk.Toplevel):
 
             node_x_coords = [start_x + i * col_w + 40 for i in range(num_nodes)]
             poly_x_coords = [(node_x_coords[i] + node_x_coords[i+1]) / 2 for i in range(num_inputs)]
+            gate_geometry.append({
+                'gate_index': gate_index,
+                'gate': gate,
+                'node_x_coords': node_x_coords,
+                'diffusion_start': node_x_coords[0] - 25,
+                'diffusion_end': node_x_coords[-1] + 25
+            })
 
-            # 1. Power Rails (Metal-1 Blue)
-            vx1, vy1 = self.to_screen(start_x, y_vdd)
-            vx2, vy2 = self.to_screen(start_x + gate_width, y_vdd)
-            c.create_line(vx1, vy1, vx2, vy2, fill=c_metal, width=max(4, int(6 * self.zoom)))
-            c.create_text(vx2 + 25, vy1, text="VDD", fill="#ffffff", font=("Arial", max(9, int(12 * self.zoom)), "bold"))
-
-            gx1, gy1 = self.to_screen(start_x, y_gnd)
-            gx2, gy2 = self.to_screen(start_x + gate_width, y_gnd)
-            c.create_line(gx1, gy1, gx2, gy2, fill=c_metal, width=max(4, int(6 * self.zoom)))
-            c.create_text(gx2 + 25, gy1, text="GND", fill="#ffffff", font=("Arial", max(9, int(12 * self.zoom)), "bold"))
-
-            # 2. Gate Header Label
-            c.create_text(vx1 + 5, vy1 - 22, text=f"Stick Diagram: {gate_title}", fill="#fab387", 
+            # Gate Header Label
+            header_x, header_y = self.to_screen(start_x, y_vdd)
+            c.create_text(header_x + 5, header_y - 22, text=f"Stick Diagram: {gate_title}", fill="#fab387",
                           font=("Arial", max(9, int(12 * self.zoom)), "bold"), anchor="w")
 
             # 3. Demarcation Line (Center Dashed Line)
@@ -245,9 +285,15 @@ class StickDiagramWindow(tk.Toplevel):
             # 7. pDIFF Contacts and Metal Connections
             for contact in p_contacts:
                 nx_val = node_x_coords[contact['idx']]
+                if (gate_index, 'p', contact['idx']) in shared_terminal_indices:
+                    continue
                 self.draw_contact_cut(nx_val, y_pdiff)
                 if contact['type'] == 'VDD':
                     c1, c2 = self.to_screen(nx_val, y_vdd), self.to_screen(nx_val, y_pdiff)
+                    c.create_line(c1[0], c1[1], c2[0], c2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
+                elif contact['type'] == 'XOR_BRANCH':
+                    branch_y = y_vdd + 45
+                    c1, c2 = self.to_screen(nx_val, y_pdiff), self.to_screen(nx_val, branch_y)
                     c.create_line(c1[0], c1[1], c2[0], c2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
                 elif contact['type'] == 'Y':
                     c1, c2 = self.to_screen(nx_val, y_pdiff), self.to_screen(nx_val, y_well)
@@ -261,6 +307,16 @@ class StickDiagramWindow(tk.Toplevel):
                 if contact['type'] == 'GND':
                     c1, c2 = self.to_screen(nx_val, y_ndiff), self.to_screen(nx_val, y_gnd)
                     c.create_line(c1[0], c1[1], c2[0], c2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
+                elif contact['type'] == 'GND_M2':
+                    # Keep the route on M1 up to GND; use M2 only to cross the rail.
+                    y_m1_landing = y_gnd - 15
+                    y_underpass = y_gnd + 45
+                    c1, c2 = self.to_screen(nx_val, y_ndiff), self.to_screen(nx_val, y_m1_landing)
+                    c.create_line(c1[0], c1[1], c2[0], c2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
+                    self.draw_contact_cut(nx_val, y_m1_landing)
+                    c3 = self.to_screen(nx_val, y_underpass)
+                    c.create_line(c2[0], c2[1], c3[0], c3[1], fill=c_metal2, width=max(3, int(4 * self.zoom)))
+                    self.draw_contact_cut(nx_val, y_underpass)
                 elif contact['type'] == 'Y':
                     c1, c2 = self.to_screen(nx_val, y_ndiff), self.to_screen(nx_val, y_well)
                     c.create_line(c1[0], c1[1], c2[0], c2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
@@ -270,9 +326,50 @@ class StickDiagramWindow(tk.Toplevel):
             if y_x_coords:
                 min_yx = min(y_x_coords)
                 max_yx = max(y_x_coords)
-                
-                m1, m2 = self.to_screen(min_yx, y_well), self.to_screen(max_yx + 35, y_well)
+
+                bus_end_x = max(max_yx, node_x_coords[-1] + 65)
+                m1, m2 = self.to_screen(min_yx, y_well), self.to_screen(bus_end_x, y_well)
                 c.create_line(m1[0], m1[1], m2[0], m2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
                 c.create_text(m2[0] + 15, m2[1], text="Y", fill="#ffffff", font=("Arial", max(10, int(14 * self.zoom)), "bold"))
 
             start_x += gate_width + 80
+
+        # Join matching rail terminals so adjacent gates share an active region.
+        for left, right in zip(gate_geometry, gate_geometry[1:]):
+            left_gate = left['gate']
+            right_gate = right['gate']
+            left_last_idx = len(left['node_x_coords']) - 1
+            left_p_terminal = next(
+                (contact['type'] for contact in left_gate['p_contacts'] if contact['idx'] == left_last_idx),
+                None
+            )
+            right_p_terminal = next(
+                (contact['type'] for contact in right_gate['p_contacts'] if contact['idx'] == 0),
+                None
+            )
+            if left_p_terminal == right_p_terminal == 'VDD':
+                x1, y = self.to_screen(left['diffusion_end'], 150)
+                x2, _ = self.to_screen(right['diffusion_start'], 150)
+                c.create_line(x1, y, x2, y, fill=c_pdiff, width=max(8, int(12 * self.zoom)))
+
+        # Join the two pull-up branch nodes in the XOR/XNOR layout.
+        for geometry in gate_geometry:
+            if geometry['gate']['gtype'] not in ('XOR', 'XNOR'):
+                continue
+            branch_contacts = [
+                contact for contact in geometry['gate']['p_contacts']
+                if contact['type'] == 'XOR_BRANCH'
+            ]
+            if len(branch_contacts) == 2:
+                node_x = geometry['node_x_coords']
+                x1, branch_y = self.to_screen(node_x[branch_contacts[0]['idx']], 105)
+                x2, _ = self.to_screen(node_x[branch_contacts[1]['idx']], 105)
+                c.create_line(x1, branch_y, x2, branch_y, fill=c_metal, width=max(3, int(4 * self.zoom)))
+
+            underpass_start = self.to_screen(node_x[0], 445)
+            underpass_end = self.to_screen(node_x[4], 445)
+            c.create_line(
+                underpass_start[0], underpass_start[1],
+                underpass_end[0], underpass_end[1],
+                fill=c_metal, width=max(3, int(4 * self.zoom))
+            )
