@@ -79,14 +79,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     output_nodes = [n for n in graph_data['nodes'] if n['type'] == 'OUTPUT']
     input_nodes = [n for n in graph_data['nodes'] if n['type'] == 'INPUT']
 
-    empty_summary = {
-        "pre_sizing_D": 0.0,
-        "ideal_D": 0.0,
-        "actual_D": 0.0,
-        "N_opt": 0.0,
-        "N_opt_int": 0,
-        "critical_full_path": []
-    }
+    empty_summary = {"ideal_D": 0.0, "actual_D": 0.0, "N_opt": 0.0, "N_opt_int": 0, "critical_full_path": []}
     if not logic_nodes:
         return empty_summary, "No logic gates found in schematic.", {}, ["[Auto: No paths found]"]
 
@@ -146,21 +139,91 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         if node['type'] not in ('INPUT', 'OUTPUT'):
             current_cin[nid] = float(node['size'])
 
-    # Branching effort is the total successor logical effort normalized by
-    # the logical effort of the successor on the selected path.
-    def compute_topological_stage_branching(nid, next_on_path_id):
-        succ_ids = {sid for sid, _ in out_edges[nid] if nodes[sid]['type'] != 'OUTPUT'}
+    direct_input_gate_ids = {
+        nid for nid in nodes
+        if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')
+        and any(nodes[pid]['type'] == 'INPUT' for pid, _ in in_edges[nid])
+    }
+
+    reverse_stage_order = sorted(
+        (nid for nid in nodes if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')),
+        key=lambda nid: stage_map.get(nid, 0),
+        reverse=True,
+    )
+
+    def ideal_gate_cins(f_hat, c_load):
+        cin_values = current_cin.copy()
+        for nid in reverse_stage_order:
+            if nid in direct_input_gate_ids:
+                continue
+            output_cap = sum(
+                float(nodes[sid].get('cl', 120.0))
+                if nodes[sid]['type'] == 'OUTPUT'
+                else get_pin_cin(sid, cin_values.get(sid, current_cin[sid]))
+                for sid, _ in out_edges[nid]
+            )
+            if output_cap <= 0:
+                output_cap = c_load
+            g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+            cin_values[nid] = g * output_cap / f_hat
+        return cin_values
+
+    def compute_topological_stage_branching(nid, next_on_path_id, cin_values):
+        succ_ids = {sid for sid, _ in out_edges[nid]}
         if not succ_ids or next_on_path_id not in succ_ids:
             return 1.0
 
-        total_g = sum(
-            get_gate_info(nodes[sid]['type'], nodes[sid]['inputs'])[0]
+        total_cap = sum(
+            get_pin_cin(
+                sid,
+                cin_values.get(sid, current_cin.get(sid, float(nodes[sid].get('cl', 120.0)))),
+            )
             for sid in succ_ids
         )
-        on_path_g = get_gate_info(
-            nodes[next_on_path_id]['type'], nodes[next_on_path_id]['inputs']
-        )[0]
-        return total_g / on_path_g if on_path_g > 0 else 1.0
+        on_path_cap = get_pin_cin(
+            next_on_path_id,
+            cin_values.get(
+                next_on_path_id,
+                current_cin.get(next_on_path_id, float(nodes[next_on_path_id].get('cl', 120.0))),
+            ),
+        )
+        return total_cap / on_path_cap if on_path_cap > 0 else 1.0
+
+    def calculate_path_efforts(logic_path, c_load):
+        n_stages = len(logic_path)
+        path_g, path_p = 1.0, 0.0
+        for nid in logic_path:
+            g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
+            path_g *= g
+            path_p += p_val
+
+        first_cin = get_pin_cin(logic_path[0], current_cin[logic_path[0]])
+        path_h = c_load / first_cin if first_cin > 0 else 1.0
+
+        def branch_effort(f_hat):
+            cin_values = ideal_gate_cins(f_hat, c_load)
+            effort = 1.0
+            for idx, nid in enumerate(logic_path[:-1]):
+                effort *= compute_topological_stage_branching(
+                    nid, logic_path[idx + 1], cin_values
+                )
+            return effort
+
+        f_hat = max(1.0, path_g * path_h) ** (1.0 / n_stages)
+        for _ in range(100):
+            path_b = branch_effort(f_hat)
+            path_f = path_g * path_b * path_h
+            new_f_hat = path_f ** (1.0 / n_stages)
+            if math.isclose(new_f_hat, f_hat, rel_tol=1e-10, abs_tol=1e-10):
+                f_hat = new_f_hat
+                path_b = branch_effort(f_hat)
+                path_f = path_g * path_b * path_h
+                return path_g, path_b, path_h, path_f, path_p, n_stages, (
+                    path_f ** (1.0 / n_stages) * n_stages + path_p
+                )
+            f_hat = new_f_hat
+
+        raise RuntimeError("Branching-effort calculation did not converge.")
 
     def format_path_string(path_ids):
         formatted = []
@@ -184,26 +247,9 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         end_node = nodes[p[-1]]
         c_load_p = float(end_node['cl']) if end_node['type'] == 'OUTPUT' else 120.0
 
-        G_p, P_p = 1.0, 0.0
-        for nid in logic_p:
-            g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-            G_p *= g
-            P_p += p_val
-
-        B_p = 1.0
-        for idx, nid in enumerate(logic_p):
-            if idx + 1 < len(logic_p):
-                next_on_path_id = logic_p[idx + 1]
-                b_i = compute_topological_stage_branching(nid, next_on_path_id)
-            else:
-                b_i = 1.0
-            B_p *= b_i
-
-        c_in_first_pin = get_pin_cin(logic_p[0], current_cin[logic_p[0]]) if logic_p else 1.0
-        H_p = c_load_p / c_in_first_pin if c_in_first_pin > 0 else 1.0
-        F_p = G_p * B_p * H_p
-        f_hat_p = F_p ** (1.0 / N_p) if N_p > 0 else 0
-        D_ideal_p = N_p * f_hat_p + P_p if N_p > 0 else 0.0
+        G_p, B_p, H_p, F_p, P_p, N_p, D_ideal_p = calculate_path_efforts(
+            logic_p, c_load_p
+        )
 
         path_str = format_path_string(p)
 
@@ -229,30 +275,12 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         else:
             p = custom_graphical_path
             logic_p = [nid for nid in p if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')]
-            N_p = len(logic_p)
             end_node = nodes[p[-1]]
             c_load_p = float(end_node['cl']) if end_node['type'] == 'OUTPUT' else 120.0
 
-            G_p, P_p = 1.0, 0.0
-            for nid in logic_p:
-                g, p_val, _, _, _ = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])
-                G_p *= g
-                P_p += p_val
-
-            B_p = 1.0
-            for idx, nid in enumerate(logic_p):
-                if idx + 1 < len(logic_p):
-                    next_on_path_id = logic_p[idx + 1]
-                    b_i = compute_topological_stage_branching(nid, next_on_path_id)
-                else:
-                    b_i = 1.0
-                B_p *= b_i
-
-            c_in_first_pin = get_pin_cin(logic_p[0], current_cin[logic_p[0]]) if logic_p else 1.0
-            H_p = c_load_p / c_in_first_pin if c_in_first_pin > 0 else 1.0
-            F_p = G_p * B_p * H_p
-            f_hat_p = F_p ** (1.0 / N_p) if N_p > 0 else 0
-            D_ideal_p = N_p * f_hat_p + P_p if N_p > 0 else 0.0
+            G_p, B_p, H_p, F_p, P_p, N_p, D_ideal_p = calculate_path_efforts(
+                logic_p, c_load_p
+            )
 
             path_str = format_path_string(p)
 
@@ -276,12 +304,6 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N = target_eval['N']
     c_load = target_eval['c_load']
 
-    direct_input_gate_ids = {
-        nid for nid in nodes
-        if nodes[nid]['type'] not in ('INPUT', 'OUTPUT')
-        and any(nodes[pid]['type'] == 'INPUT' for pid, _ in in_edges[nid])
-    }
-
     in_degree = {nid: len(in_edges[nid]) for nid in nodes}
     queue = [nid for nid, deg in in_degree.items() if deg == 0]
     topo_order = []
@@ -301,13 +323,12 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
     max_iters = 50
     converged = False
-    oscillation_resolved = False
     iters_run = 0
     G, B, H, F, P = (target_eval[key] for key in ('G', 'B', 'H', 'F', 'P'))
     f_hat_target = F ** (1.0 / N) if N > 0 else 0.0
+    ideal_f_hat = f_hat_target
     ideal_D = target_eval['D_ideal']
     fixed_input_cin = {nid: current_cin[nid] for nid in direct_input_gate_ids}
-    sizing_history = []
 
     def get_gate_output_cap(nid, cin_values):
         output_cap = 0.0
@@ -348,31 +369,25 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         rounded_F = math.prod(stage_efforts)
         new_f_hat = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
         ideal_D = N * new_f_hat + P
+        current_cin = new_cin
 
         if math.isclose(new_f_hat, f_hat_target, rel_tol=1e-6, abs_tol=1e-6):
-            current_cin = new_cin
             converged = True
             break
-
-        state = tuple(new_cin[nid] for nid in rev_topo_logic_nodes)
-        if len(sizing_history) >= 2 and state == sizing_history[-2][0] and state != sizing_history[-1][0]:
-            previous_effort, previous_cin = sizing_history[-1][1], sizing_history[-1][2]
-            if rounded_F < previous_effort:
-                current_cin = new_cin
-            else:
-                current_cin = previous_cin
-            oscillation_resolved = True
-            break
-
-        sizing_history.append((state, rounded_F, new_cin.copy()))
-        current_cin = new_cin
         f_hat_target = new_f_hat
 
     final_stage_f = get_path_stage_efforts(current_cin)
     rounded_F = math.prod(final_stage_f)
     f_hat_rounded = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
-    ideal_D = N * f_hat_rounded + P
+    ideal_D = N * ideal_f_hat + P
     actual_D = sum(final_stage_f) + P
+    stage_f_hat = {stage_map[nid]: f_hat_rounded for nid in critical_logic_path}
+    unrounded_cin = {}
+    for nid in rev_topo_logic_nodes:
+        g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+        output_cap = get_gate_output_cap(nid, current_cin)
+        gate_f_hat = stage_f_hat.get(stage_map.get(nid), f_hat_rounded)
+        unrounded_cin[nid] = (g * output_cap / gate_f_hat) if gate_f_hat > 0 else current_cin[nid]
 
     p_avg = P / N if N > 0 else 1.0
     def solve_optimal_f_hat(p_val):
@@ -393,7 +408,6 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     N_opt_int = round(N_opt)
 
     summary = {
-        "pre_sizing_D": target_eval['D_ideal'],
         "ideal_D": ideal_D,
         "actual_D": actual_D,
         "N_opt": N_opt,
@@ -417,14 +431,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append(f"2. Logic Gates Path: {' -> '.join(path_names)}")
 
     lines.append(f"\n3. Convergence:")
-    sizing_status = (
-        "OSCILLATION RESOLVED (LOWER-EFFORT STATE)"
-        if oscillation_resolved
-        else "CONVERGED" if converged else "MAX ITERS REACHED"
-    )
-    lines.append(f"   Iterative Sizing Status : {sizing_status}")
-    if oscillation_resolved:
-        lines.append("   Two-state cycle detected; selected the state with lower total path effort.")
+    lines.append(f"   Iterative Sizing Status : {'CONVERGED' if converged else 'MAX ITERS REACHED'}")
     lines.append(f"   Total Iterations        : {iters_run}")
 
     lines.append("\n4. Final Path Efforts & Branching:")
@@ -434,6 +441,8 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append(f"   Initial Path Effort F   = G * B * H = {F:.3f}")
 
     lines.append("\n5. Path Delays:")
+    lines.append(f"   Corrected Path Effort F = {F:.3f}")
+    lines.append(f"   Corrected f_hat         = {ideal_f_hat:.3f}")
     lines.append(f"   Rounded Path Effort F   = {rounded_F:.3f}")
     lines.append(f"   Rounded f_hat           = {f_hat_rounded:.3f}")
     lines.append(f"   IDEAL PATH DELAY D_ideal = {ideal_D:.3f} tau")
@@ -442,7 +451,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     lines.append(f"   Total Parasitic Delay P  = {P:.3f}")
     lines.append(f"   ACTUAL PATH DELAY D      = {actual_D:.3f} tau")
 
-    lines.append("\n6. Final Transistor Widths & Rounded Input Capacitances (Cin):")
+    lines.append("\n6. Final Transistor Widths & Input Capacitances (Cin):")
     all_logic_ids = sorted(
         critical_logic_path + [n['id'] for n in logic_nodes if n['id'] not in critical_logic_path],
         key=lambda nid: (stage_map.get(nid, 0), nid)
@@ -450,9 +459,10 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     for nid in all_logic_ids:
         node = nodes[nid]
         c_val = current_cin.get(nid, float(node['size']))
+        target_cin = unrounded_cin.get(nid, c_val)
         lock_str = " [INPUT-DRIVEN, FIXED]" if nid in direct_input_gate_ids else ""
         stg = stage_map.get(nid, '?')
-        lines.append(f"   Stage {stg} | Gate #{nid} [{node.get('name', node['type'])}]: Cin = {c_val:.1f} C{lock_str}")
+        lines.append(f"   Stage {stg} | Gate #{nid} [{node.get('name', node['type'])}]: Target Cin = {target_cin:.3f} C | Final Cin = {c_val:.1f} C{lock_str}")
 
     lines.append("\n7. OPTIMAL STAGE COUNT TUNING (N_opt):")
     lines.append(f"   Avg Parasitic p_avg = {p_avg:.3f}")
@@ -556,20 +566,9 @@ class TransistorSchematicWindow(tk.Toplevel):
         cin_val = node['size']
         node_name = node.get('name', f"{gtype}{node['id']}")
         stage_str = f" | Stage {stage_num}" if stage_num is not None else ""
-        self.rail_bottom = 520
-        if gtype == 'NAND':
-            nmos_start_y = 250
-            nmos_step = 50
-            self.rail_bottom = max(self.rail_bottom, nmos_start_y + (n_in - 1) * nmos_step + 65)
-        elif gtype == 'NOR':
-            pmos_start_y = 80
-            pmos_step = 62
-            last_pmos_y = pmos_start_y + (n_in - 1) * pmos_step
-            nmos_y = max(380, last_pmos_y + 110)
-            self.rail_bottom = max(self.rail_bottom, nmos_y + 100)
         
         self.title(f"Transistor Schematic - Gate {node_name} ({gtype})")
-        self.geometry(f"860x{max(680, self.rail_bottom + 150)}")
+        self.geometry("860x680")
         self.configure(bg="#11111b")
 
         ttk.Label(self, text=f"CMOS Transistor Level Schematic for Gate {node_name}{stage_str}", 
@@ -621,8 +620,8 @@ class TransistorSchematicWindow(tk.Toplevel):
         c.create_line(50, 40, 780, 40, fill="#f9e2af", width=4)
         c.create_text(70, 25, text="VDD", fill="#f9e2af", font=("Arial", 11, "bold"))
 
-        c.create_line(50, self.rail_bottom, 780, self.rail_bottom, fill="#a6adc8", width=4)
-        c.create_text(70, self.rail_bottom + 15, text="GND", fill="#a6adc8", font=("Arial", 11, "bold"))
+        c.create_line(50, 520, 780, 520, fill="#a6adc8", width=4)
+        c.create_text(70, 535, text="GND", fill="#a6adc8", font=("Arial", 11, "bold"))
 
         if gtype == 'INV':
             wp, wn = 2.0 * x_scale, 1.0 * x_scale
@@ -683,106 +682,6 @@ class TransistorSchematicWindow(tk.Toplevel):
             c.create_line(605, 280, 605, 345, fill="#89b4fa", width=2)
             c.create_line(535, 280, 740, 280, fill="#89b4fa", width=3)
             c.create_text(755, 280, text="OUT", fill="#89b4fa", font=("Arial", 10, "bold"))
-
-        elif gtype in ('NAND', 'NOR'):
-            n_in = max(1, int(n_in))
-            stack_x = 500
-            stack_start_y = 80
-            stack_step = 52
-            output_x = 800
-
-            def input_name(index):
-                if index < 26:
-                    return chr(ord('A') + index)
-                return f"A{index - 25}"
-
-            def draw_input(index, x, y):
-                name = input_name(index)
-                c.create_line(x - 110, y, x - 35, y, fill="#cdd6f4", width=2)
-                c.create_text(x - 115, y, text=f"IN {name}", fill="#cdd6f4",
-                              font=("Arial", 8, "bold"), anchor="e")
-
-            if gtype == 'NAND':
-                pmos_y = 120
-                nmos_stack_start_y = 250
-                nmos_stack_step = 50
-                output_y = nmos_stack_start_y - 15
-                pmos_xs = [
-                    150 + index * 550 / max(n_in - 1, 1)
-                    for index in range(n_in)
-                ]
-                for index, x in enumerate(pmos_xs):
-                    self.draw_pmos(x, pmos_y, 2.0 * x_scale, f"Mp{index + 1}")
-                    draw_input(index, x, pmos_y)
-                    c.create_line(x + 15, 40, x + 15, pmos_y - 15,
-                                  fill="#f9e2af", width=2)
-                    c.create_line(x + 15, pmos_y + 15, x + 15, output_y,
-                                  fill="#f38ba8", width=2)
-
-                c.create_line(pmos_xs[0] + 15, output_y, output_x, output_y,
-                              fill="#89b4fa", width=2)
-                for index in range(n_in):
-                    y = nmos_stack_start_y + index * nmos_stack_step
-                    self.draw_nmos(stack_x, y, n_in * x_scale, f"Mn{index + 1}")
-                    draw_input(index, stack_x, y)
-                    if index < n_in - 1:
-                        next_y = nmos_stack_start_y + (index + 1) * nmos_stack_step
-                        c.create_line(stack_x + 15, y + 15, stack_x + 15, next_y - 15,
-                                      fill="#89b4fa", width=2)
-                    else:
-                        c.create_line(stack_x + 15, y + 15, stack_x + 15, self.rail_bottom,
-                                      fill="#a6adc8", width=2)
-
-                c.create_line(stack_x + 15, nmos_stack_start_y - 15,
-                              output_x, nmos_stack_start_y - 15, fill="#89b4fa", width=2)
-                c.create_line(output_x, nmos_stack_start_y - 15, output_x, output_y,
-                              fill="#89b4fa", width=2)
-                c.create_text(output_x + 10, output_y, text="OUT", fill="#89b4fa",
-                              font=("Arial", 10, "bold"), anchor="w")
-            else:
-                pmos_stack_start_y = 80
-                pmos_stack_step = 62
-                last_pmos_y = pmos_stack_start_y + (n_in - 1) * pmos_stack_step
-                nmos_y = max(380, last_pmos_y + 110)
-                output_y = nmos_y - 60
-                ground_bus_y = nmos_y + 55
-                nmos_xs = [
-                    150 + index * 550 / max(n_in - 1, 1)
-                    for index in range(n_in)
-                ]
-                for index, x in enumerate(nmos_xs):
-                    self.draw_nmos(x, nmos_y, x_scale, f"Mn{index + 1}")
-                    draw_input(index, x, nmos_y)
-                    c.create_line(x + 15, nmos_y - 15, x + 15, output_y,
-                                  fill="#89b4fa", width=2)
-                    c.create_line(x + 15, nmos_y + 15, x + 15, ground_bus_y,
-                                  fill="#a6adc8", width=2)
-
-                c.create_line(nmos_xs[0] + 15, output_y, output_x, output_y,
-                              fill="#89b4fa", width=2)
-                c.create_line(nmos_xs[0] + 15, ground_bus_y, nmos_xs[-1] + 15, ground_bus_y,
-                              fill="#a6adc8", width=2)
-                c.create_line(nmos_xs[0] + 15, ground_bus_y, nmos_xs[0] + 15, self.rail_bottom,
-                              fill="#a6adc8", width=2)
-
-                for index in range(n_in):
-                    y = pmos_stack_start_y + index * pmos_stack_step
-                    self.draw_pmos(stack_x, y, 2.0 * n_in * x_scale, f"Mp{index + 1}")
-                    draw_input(index, stack_x, y)
-                    if index == 0:
-                        c.create_line(stack_x + 15, 40, stack_x + 15, y - 15,
-                                      fill="#f9e2af", width=2)
-                    else:
-                        previous_y = pmos_stack_start_y + (index - 1) * pmos_stack_step
-                        c.create_line(stack_x + 15, previous_y + 15, stack_x + 15, y - 15,
-                                      fill="#f38ba8", width=2)
-
-                c.create_line(stack_x + 15, last_pmos_y + 15,
-                              stack_x + 15, output_y, fill="#89b4fa", width=2)
-                c.create_line(stack_x + 15, output_y, output_x, output_y,
-                              fill="#89b4fa", width=2)
-                c.create_text(output_x + 10, output_y, text="OUT", fill="#89b4fa",
-                              font=("Arial", 10, "bold"), anchor="w")
 
 
 # =====================================================================
@@ -878,8 +777,7 @@ class SchematicCanvas(tk.Canvas):
             self.pan_x += dx
             self.pan_y += dy
             self.pan_start = (event.x, event.y)
-            self.move("schematic", dx, dy)
-            self.draw_grid()
+            self.render()
 
     def zoom_at(self, sx, sy, factor):
         new_zoom = max(0.3, min(3.0, self.zoom * factor))
@@ -990,18 +888,24 @@ class SchematicCanvas(tk.Canvas):
 
         in_pins = []
         if n_in == 1:
-            in_pins.append((round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
-                            round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
+            in_pins.append((
+                round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE
+            ))
         elif n_in > 1:
             for i in range(n_in):
                 pin_y = y + (i - (n_in - 1) / 2) * self.ROUTING_GRID_SIZE * 2
-                in_pins.append((round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
-                                round(pin_y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
+                in_pins.append((
+                    round((x - 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                    round(pin_y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE
+                ))
 
         out_pins = []
         if gtype != 'OUTPUT':
-            out_pins.append((round((x + 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
-                             round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE))
+            out_pins.append((
+                round((x + 40) / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE,
+                round(y / self.ROUTING_GRID_SIZE) * self.ROUTING_GRID_SIZE
+            ))
 
         return in_pins, out_pins
 
@@ -1332,9 +1236,15 @@ class SchematicCanvas(tk.Canvas):
             for i in range(len(s_path) - 1):
                 p1, p2 = s_path[i], s_path[i+1]
                 if abs(p1[1] - p2[1]) < 1:
-                    screen_h_segments.append({'x1': p1[0], 'x2': p2[0], 'y': p1[1], 'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical})
+                    screen_h_segments.append({
+                        'x1': p1[0], 'x2': p2[0], 'y': p1[1],
+                        'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical
+                    })
                 elif abs(p1[0] - p2[0]) < 1:
-                    screen_v_segments.append({'x': p1[0], 'y1': p1[1], 'y2': p2[1], 'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical})
+                    screen_v_segments.append({
+                        'x': p1[0], 'y1': p1[1], 'y2': p2[1],
+                        'wire_idx': w_idx, 'net_id': net_id, 'is_crit': is_critical
+                    })
 
         connected_junctions = {
             self.to_screen(x, y)
@@ -1388,8 +1298,10 @@ class SchematicCanvas(tk.Canvas):
 
         for x, y in connected_junctions:
             radius = max(3, int(4 * self.zoom))
-            self.create_oval(x - radius, y - radius, x + radius, y + radius,
-                             fill="#89b4fa", outline="#89b4fa", tags="schematic")
+            self.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                fill="#89b4fa", outline="#89b4fa", tags="schematic"
+            )
 
         for nid, node in self.nodes.items():
             wx, wy = node['x'], node['y']
@@ -1423,12 +1335,12 @@ class SchematicCanvas(tk.Canvas):
                                     fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_oval(x+s15, y-4*self.zoom, x+s15+8*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype == 'NAND':
-                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
+                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
                 self.create_rectangle(x-s30, y-height/2, x, y+height/2, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_arc(x-25*self.zoom, y-height/2, x+20*self.zoom, y+height/2, start=-90, extent=180, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
                 self.create_oval(x+20*self.zoom, y-4*self.zoom, x+28*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype == 'NOR':
-                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
+                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
                 top_y = y - height / 2
                 bot_y = y + height / 2
                 self.create_polygon(
@@ -1442,7 +1354,7 @@ class SchematicCanvas(tk.Canvas):
                 )
                 self.create_oval(x+18*self.zoom, y-4*self.zoom, x+26*self.zoom, y+4*self.zoom, fill="#313244", outline=outline_color, width=wire_width, tags="schematic")
             elif gtype in ('XOR', 'XNOR'):
-                height = max(50*self.zoom, ((node['inputs'] - 1) * 20 + 30) * self.zoom)
+                height = max(50*self.zoom, node['inputs'] * 15 * self.zoom)
                 top_y = y - height / 2
                 bot_y = y + height / 2
                 self.create_arc(x-42*self.zoom, top_y, x-26*self.zoom, bot_y, start=-90, extent=180, style=tk.ARC, outline=outline_color, width=wire_width, tags="schematic")
@@ -1469,11 +1381,7 @@ class SchematicCanvas(tk.Canvas):
 
             if gtype not in ('INPUT', 'OUTPUT'):
                 lbl = f"[Stage {stg}] {name} (Cin={node['size']:.1f}C)"
-                label_offset = max(
-                    (((node['inputs'] - 1) * 20 + 30) / 2 + 20) * self.zoom,
-                    node['inputs'] * 10 * self.zoom
-                )
-                self.create_text(x, y - label_offset, text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
+                self.create_text(x, y - max(30*self.zoom, node['inputs']*10*self.zoom), text=lbl, fill="#cdd6f4", font=("Arial", max(7, int(9 * self.zoom))), tags="schematic")
 
             in_pins, out_pins = self.get_pin_positions(node)
             pin_labels = self.get_pin_labels(node)
@@ -1484,8 +1392,8 @@ class SchematicCanvas(tk.Canvas):
                 
                 if idx < len(pin_labels) and gtype not in ('INPUT', 'OUTPUT'):
                     lbl_text = pin_labels[idx]
-                    self.create_text(spx - 4 * self.zoom, spy - 7 * self.zoom, text=lbl_text, fill="#f5c2e7",
-                                     font=("Arial", max(6, int(8 * self.zoom)), "bold"), anchor="s", tags="schematic")
+                    self.create_text(spx - 8 * self.zoom, spy, text=lbl_text, fill="#f5c2e7", 
+                                     font=("Arial", max(6, int(8 * self.zoom)), "bold"), anchor="e", tags="schematic")
 
             for px, py in out_pins:
                 spx, spy = self.to_screen(px, py)
@@ -1552,7 +1460,7 @@ class VLSIWorkbenchApp(tk.Tk):
         
         ttk.Label(row1, text="Inputs (N):").pack(side=tk.LEFT, padx=(6, 2))
         self.inputs_spin = ttk.Spinbox(row1, from_=2, to=8, width=3)
-        self.inputs_spin.set(2)
+        self.inputs_spin.set(3)
         self.inputs_spin.pack(side=tk.LEFT, padx=2)
 
         ttk.Button(row1, text="+ NAND", command=lambda: self.add_gate('NAND')).pack(side=tk.LEFT, padx=2)
@@ -1902,7 +1810,7 @@ class VLSIWorkbenchApp(tk.Tk):
         else:
             self.path_combo.current(0)
 
-        self.lbl_ideal_d.config(text=f"{summary.get('pre_sizing_D', 0.0):.3f} τ")
+        self.lbl_ideal_d.config(text=f"{summary.get('ideal_D', 0.0):.3f} τ")
         self.lbl_actual_d.config(text=f"{summary.get('actual_D', 0.0):.3f} τ")
         self.lbl_n_opt.config(text=f"{summary.get('N_opt_int', 0)} stages ({summary.get('N_opt', 0.0):.2f})")
 
