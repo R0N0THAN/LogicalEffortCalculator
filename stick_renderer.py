@@ -551,7 +551,6 @@ class StickDiagramWindow(tk.Toplevel):
                 sx2, sy2 = self.to_screen(px, y_ndiff + 35)
                 c.create_line(sx1, sy1, sx2, sy2, fill=c_poly, width=max(3, int(5 * self.zoom)))
                 c.create_text(sx1, sy1 - 12, text=lbl, fill="#ffffff", font=("Arial", max(9, int(12 * self.zoom)), "bold"))
-                self.draw_contact_cut(px, y_well + 10)
 
             # 6. Render Source (S) / Drain (D) Labels for ALL pDIFF and nDIFF Nodes
             for i in range(num_nodes):
@@ -619,10 +618,18 @@ class StickDiagramWindow(tk.Toplevel):
 
                 if gate.get('output_left'):
                     bus_end_x = min(min_yx, node_x_coords[0] - 65)
-                    m1, m2 = self.to_screen(bus_end_x, y_well), self.to_screen(max_yx, y_well)
+                    bus_start_x = bus_end_x
+                    bus_end_x = max_yx
                 else:
                     bus_end_x = max(max_yx, node_x_coords[-1] + 65)
-                    m1, m2 = self.to_screen(min_yx, y_well), self.to_screen(bus_end_x, y_well)
+                    bus_start_x = min_yx
+                gate_geometry[-1]['output_bus_segment'] = (
+                    bus_start_x, bus_end_x, y_well
+                )
+                m1, m2 = (
+                    self.to_screen(bus_start_x, y_well),
+                    self.to_screen(bus_end_x, y_well)
+                )
                 c.create_line(m1[0], m1[1], m2[0], m2[1], fill=c_metal, width=max(3, int(4 * self.zoom)))
                 label_x = m1[0] - 15 if gate.get('mirrored') else m2[0] + 15
                 c.create_text(
@@ -809,15 +816,15 @@ class StickDiagramWindow(tk.Toplevel):
                 if is_next_gate:
                     route['direct_targets'].append((target_geometry, pin_idx))
 
-        # A gap route is safe only when it does not cross another net's input
-        # landing or overlap a different net already routed through the gap.
+        # Gap routes can use progressively higher M1 tracks to avoid risers.
+        direct_route_ys = (250, 220, 200, 180, 160, 140, 120, 390)
         direct_candidates = [
             (route, target_geometry, pin_idx)
             for route in wire_routes
             for target_geometry, pin_idx in route['direct_targets']
         ]
         safe_direct_targets = {id(route): [] for route in wire_routes}
-        accepted_direct_spans = []
+        accepted_direct_paths = []
         for route, target_geometry, pin_idx in sorted(
             direct_candidates,
             key=lambda item: (
@@ -841,18 +848,73 @@ class StickDiagramWindow(tk.Toplevel):
                 for contact in target_geometry['gate']['n_contacts']
                 if contact['type'] == 'Y'
             )
-            overlaps_other_net = any(
-                other_source != route['source_id']
-                and not (span_max <= other_min or other_max <= span_min)
-                for other_min, other_max, other_source in accepted_direct_spans
-            )
-            if (
-                not crosses_other_input
-                and not crosses_target_output
-                and not overlaps_other_net
-            ):
+            if crosses_other_input or crosses_target_output:
+                continue
+
+            source_y = route['source_geometry']['output_y']
+            selected_route = None
+            for route_y in direct_route_ys:
+                target_y = (
+                    target_geometry['input_landing_y']
+                    if route_y == 390
+                    else route_y
+                    if route_y < 230
+                    else target_geometry['input_via_y']
+                )
+                candidate_segments = [
+                    ((route['source_x'], source_y), (route['source_x'], route_y)),
+                    ((route['source_x'], route_y), (target_x, route_y)),
+                    ((target_x, route_y), (target_x, target_y))
+                ]
+
+                def intersects(first, second):
+                    (x1, y1), (x2, y2) = first
+                    (x3, y3), (x4, y4) = second
+                    if y1 == y2 and x3 == x4:
+                        return min(x1, x2) < x3 < max(x1, x2) and min(y3, y4) < y1 < max(y3, y4)
+                    if x1 == x2 and y3 == y4:
+                        return min(x3, x4) < x1 < max(x3, x4) and min(y1, y2) < y3 < max(y1, y2)
+                    if y1 == y2 == y3 == y4:
+                        return y1 == y3 and max(min(x1, x2), min(x3, x4)) < min(max(x1, x2), max(x3, x4))
+                    if x1 == x2 == x3 == x4:
+                        return x1 == x3 and max(min(y1, y2), min(y3, y4)) < min(max(y1, y2), max(y3, y4))
+                    return False
+
+                crosses_output_riser = any(
+                    intersects(segment, ((geometry['output_x'], geometry['output_y']),
+                                          (geometry['output_x'], geometry['input_landing_y'])))
+                    for segment in candidate_segments
+                    for geometry in gate_geometry
+                    if geometry['gate']['node_id'] != route['source_id']
+                )
+                crosses_output_bus = any(
+                    intersects(segment, ((bus_start, bus_y), (bus_end, bus_y)))
+                    for segment in candidate_segments
+                    for geometry in gate_geometry
+                    for bus_start, bus_end, bus_y in [geometry.get('output_bus_segment', (0, 0, 0))]
+                    if bus_start != bus_end
+                    and geometry['gate']['node_id'] != route['source_id']
+                )
+                crosses_other_direct = any(
+                    other_source != route['source_id']
+                    and any(
+                        intersects(segment, other_segment)
+                        for segment in candidate_segments
+                        for other_segment in other_segments
+                    )
+                    for other_source, other_segments in accepted_direct_paths
+                )
+                if not crosses_output_riser and not crosses_output_bus and not crosses_other_direct:
+                    selected_route = (route_y, candidate_segments)
+                    break
+
+            if selected_route:
+                route_y, candidate_segments = selected_route
                 safe_direct_targets[id(route)].append((target_geometry, pin_idx))
-                accepted_direct_spans.append((span_min, span_max, route['source_id']))
+                route.setdefault('direct_route_lanes', {})[
+                    (target_geometry['gate']['node_id'], pin_idx)
+                ] = route_y
+                accepted_direct_paths.append((route['source_id'], candidate_segments))
 
         for route in wire_routes:
             route['direct_targets'] = safe_direct_targets[id(route)]
@@ -881,9 +943,29 @@ class StickDiagramWindow(tk.Toplevel):
         for route in wire_routes:
             for target_geometry, pin_idx in route['direct_targets']:
                 target_x = target_geometry['input_poly_x_coords'][pin_idx]
-                track_intervals.setdefault(250, []).append(
+                route_y = route['direct_route_lanes'][
+                    (target_geometry['gate']['node_id'], pin_idx)
+                ]
+                track_intervals.setdefault(route_y, []).append(
                     (min(route['source_x'], target_x), max(route['source_x'], target_x))
                 )
+
+        input_via_positions = {
+            (geometry['gate']['node_id'], pin_idx): (poly_x, geometry['input_via_y'])
+            for geometry in gate_geometry
+            for pin_idx, poly_x in enumerate(geometry['input_poly_x_coords'])
+        }
+        for route in wire_routes:
+            for target_geometry, pin_idx in route['direct_targets']:
+                route_y = route['direct_route_lanes'][
+                    (target_geometry['gate']['node_id'], pin_idx)
+                ]
+                if route_y < 230:
+                    input_via_positions[(target_geometry['gate']['node_id'], pin_idx)] = (
+                        target_geometry['input_poly_x_coords'][pin_idx], route_y
+                    )
+        for poly_x, via_y in input_via_positions.values():
+            self.draw_contact_cut(poly_x, via_y)
 
         # Keep general nets below GND so their M1 runs do not cross gate wiring.
         for route in sorted(
@@ -959,11 +1041,16 @@ class StickDiagramWindow(tk.Toplevel):
 
             for target_geometry, pin_idx in route['direct_targets']:
                 target_x = target_geometry['input_poly_x_coords'][pin_idx]
-                route_y = 250
+                route_y = route['direct_route_lanes'][
+                    (target_geometry['gate']['node_id'], pin_idx)
+                ]
                 source_start = self.to_screen(source_x, source_geometry['output_y'])
                 source_corner = self.to_screen(source_x, route_y)
                 target_corner = self.to_screen(target_x, route_y)
-                target_via = self.to_screen(target_x, target_geometry['input_via_y'])
+                target_via_y = (
+                    route_y if route_y < 230 else target_geometry['input_via_y']
+                )
+                target_via = self.to_screen(target_x, target_via_y)
                 source_id = route['source_id']
                 if (
                     source_id not in direct_source_stems
