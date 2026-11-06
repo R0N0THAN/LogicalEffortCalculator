@@ -1439,7 +1439,7 @@ class VLSIWorkbenchApp(tk.Tk):
         self.custom_graphical_path = None
 
         self.bind_all("<Delete>", lambda e: self.delete_selected_node())
-        self.bind_all("<BackSpace>", lambda e: self.delete_selected_node())
+        self.bind_all("<BackSpace>", self.on_backspace)
         self.bind_all("<Control-z>", lambda e: self.canvas.undo())
         self.bind_all("<Command-z>", lambda e: self.canvas.undo())
 
@@ -1460,7 +1460,7 @@ class VLSIWorkbenchApp(tk.Tk):
         
         ttk.Label(row1, text="Inputs (N):").pack(side=tk.LEFT, padx=(6, 2))
         self.inputs_spin = ttk.Spinbox(row1, from_=2, to=8, width=3)
-        self.inputs_spin.set(3)
+        self.inputs_spin.set(2)
         self.inputs_spin.pack(side=tk.LEFT, padx=2)
 
         ttk.Button(row1, text="+ NAND", command=lambda: self.add_gate('NAND')).pack(side=tk.LEFT, padx=2)
@@ -1661,6 +1661,7 @@ class VLSIWorkbenchApp(tk.Tk):
         name_var.trace_add("write", on_name_change)
 
         name_entry = ttk.Entry(self.prop_frame, textvariable=name_var)
+        self.name_entry = name_entry
         name_entry.pack(fill=tk.X, pady=(0, 8))
         name_entry.bind("<FocusIn>", lambda e: self.canvas.push_undo())
         name_entry.bind("<Return>", lambda e: self.focus())
@@ -1752,6 +1753,11 @@ class VLSIWorkbenchApp(tk.Tk):
             self.canvas.selected_node_id = None
             self.on_node_selected(None)
             self.canvas.render()
+
+    def on_backspace(self, event):
+        if event.widget is getattr(self, "name_entry", None):
+            return
+        self.delete_selected_node()
 
     def get_graph_export(self):
         return {
