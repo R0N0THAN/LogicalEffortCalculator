@@ -5,7 +5,7 @@ import math
 import copy
 import heapq
 
-from stick_renderer import StickDiagramWindow
+from stick_renderer import StickDiagramWindow, _PillowCanvas
 
 
 # =====================================================================
@@ -1260,9 +1260,10 @@ class SchematicCanvas(tk.Canvas):
             return simplify_path(path)
         return None
 
-    def render(self, route_wires=True):
+    def render(self, route_wires=True, draw_grid=True):
         self.delete("schematic")
-        self.draw_grid()
+        if draw_grid:
+            self.draw_grid()
 
         stage_map = compute_stage_numbers(self.nodes, self.wires)
 
@@ -1531,6 +1532,76 @@ class SchematicCanvas(tk.Canvas):
             self.create_rectangle(10, 10, self.winfo_width()-10 if self.winfo_width() > 100 else 600, 50, fill="#f5c2e7", outline="#11111b", tags="schematic")
             self.create_text(20, 30, text=msg, fill="#11111b", font=("Arial", 10, "bold"), anchor="w", tags="schematic")
 
+    def export_png(self):
+        if not self.nodes:
+            messagebox.showerror("Export Failed", "There is no schematic to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png")],
+            initialfile="schematic.png"
+        )
+        if not file_path:
+            return
+
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            messagebox.showerror(
+                "Export Failed",
+                "PNG export requires Pillow. Install it with: pip install Pillow"
+            )
+            return
+
+        min_x = min(node['x'] for node in self.nodes.values())
+        max_x = max(node['x'] for node in self.nodes.values())
+        min_y = min(node['y'] for node in self.nodes.values())
+        max_y = max(node['y'] for node in self.nodes.values())
+        max_label_length = max(
+            (len(str(node.get('name', ''))) for node in self.nodes.values()),
+            default=0
+        )
+        padding = max(340, len(self.nodes) * 20 + 40, max_label_length * 8 + 60)
+        export_width = max(1, int(max_x - min_x + 2 * padding))
+        export_height = max(1, int(max_y - min_y + 2 * padding))
+        original_view = self.zoom, self.pan_x, self.pan_y
+        drawing_canvas = _PillowCanvas()
+        drawing_methods = (
+            "create_line", "create_oval", "create_rectangle", "create_polygon",
+            "create_arc", "create_text", "delete", "tag_lower"
+        )
+        original_methods = {
+            name: getattr(self, name)
+            for name in drawing_methods
+        }
+        original_dimensions = {
+            "winfo_width": self.winfo_width,
+            "winfo_height": self.winfo_height
+        }
+        try:
+            for name in drawing_methods:
+                setattr(self, name, getattr(drawing_canvas, name))
+            self.winfo_width = lambda: export_width
+            self.winfo_height = lambda: export_height
+            self.zoom = 1.0
+            self.pan_x = padding - min_x
+            self.pan_y = padding - min_y
+            self.render(draw_grid=False)
+            drawing_canvas.to_image(Image, ImageDraw, ImageFont).save(file_path, format="PNG")
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Export Failed", f"Could not save PNG: {error}")
+            return
+        finally:
+            for name, method in original_methods.items():
+                setattr(self, name, method)
+            for name, method in original_dimensions.items():
+                setattr(self, name, method)
+            self.zoom, self.pan_x, self.pan_y = original_view
+
+        messagebox.showinfo("Export Success", "Full schematic exported with a transparent background.")
+
 
 # =====================================================================
 # MAIN WORKBENCH GUI APP
@@ -1591,6 +1662,7 @@ class VLSIWorkbenchApp(tk.Tk):
 
         ttk.Button(row2, text="Export JSON", command=self.export_json).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="Import JSON", command=self.import_json).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="Export PNG", command=lambda: self.canvas.export_png()).pack(side=tk.LEFT, padx=2)
 
         ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
 

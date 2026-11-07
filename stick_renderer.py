@@ -34,11 +34,30 @@ class _PillowCanvas:
             (tagged if tag in tags else other).append(item)
         self.items = other + tagged
 
+    def tag_lower(self, tag):
+        tagged = []
+        other = []
+        for item in self.items:
+            tags = item[2].get('tags', ())
+            if isinstance(tags, str):
+                tags = (tags,)
+            (tagged if tag in tags else other).append(item)
+        self.items = tagged + other
+
     def create_line(self, *coords, **options):
         self.items.append(('line', coords, options))
 
     def create_oval(self, *coords, **options):
         self.items.append(('oval', coords, options))
+
+    def create_rectangle(self, *coords, **options):
+        self.items.append(('rectangle', coords, options))
+
+    def create_polygon(self, *coords, **options):
+        self.items.append(('polygon', coords, options))
+
+    def create_arc(self, *coords, **options):
+        self.items.append(('arc', coords, options))
 
     def create_text(self, *coords, **options):
         self.items.append(('text', coords, options))
@@ -125,6 +144,46 @@ class _PillowCanvas:
                     outline=options.get('outline'),
                     width=max(1, int(options.get('width', 1)))
                 )
+            elif kind == 'rectangle':
+                draw.rectangle(
+                    shifted, fill=fill,
+                    outline=options.get('outline'),
+                    width=max(1, int(options.get('width', 1)))
+                )
+            elif kind == 'polygon':
+                points = list(zip(shifted[::2], shifted[1::2]))
+                if options.get('smooth') and len(points) > 2:
+                    points = self._smooth_polygon(points)
+                draw.polygon(points, fill=fill)
+                if options.get('outline'):
+                    draw.line(
+                        points + [points[0]],
+                        fill=options['outline'],
+                        width=max(1, int(options.get('width', 1))),
+                        joint='curve'
+                    )
+            elif kind == 'arc':
+                start = options.get('start', 0)
+                end = start + options.get('extent', 90)
+                # Reverse endpoints because Tkinter angles increase counter-clockwise.
+                pil_start, pil_end = -(start + options.get('extent', 90)), -start
+                width = max(1, int(options.get('width', 1)))
+                style = options.get('style', 'pieslice')
+                if style == 'pieslice':
+                    draw.pieslice(
+                        shifted, start=pil_start, end=pil_end, fill=fill,
+                        outline=options.get('outline'), width=width
+                    )
+                elif style == 'chord':
+                    draw.chord(
+                        shifted, start=pil_start, end=pil_end, fill=fill,
+                        outline=options.get('outline'), width=width
+                    )
+                else:
+                    draw.arc(
+                        shifted, start=pil_start, end=pil_end,
+                        fill=options.get('outline') or fill, width=width
+                    )
             elif kind == 'text':
                 x, y = shifted[:2]
                 text = str(options.get('text', ''))
@@ -150,6 +209,33 @@ class _PillowCanvas:
                 draw.text((x, y), text, fill=fill, font=font)
 
         return image
+
+    @staticmethod
+    def _smooth_polygon(points, steps_per_segment=12):
+        smoothed = []
+        count = len(points)
+        for index, current in enumerate(points):
+            previous = points[(index - 1) % count]
+            following = points[(index + 1) % count]
+            after_following = points[(index + 2) % count]
+            for step in range(steps_per_segment):
+                t = step / steps_per_segment
+                t_squared = t * t
+                t_cubed = t_squared * t
+                x = 0.5 * (
+                    2 * current[0]
+                    + (-previous[0] + following[0]) * t
+                    + (2 * previous[0] - 5 * current[0] + 4 * following[0] - after_following[0]) * t_squared
+                    + (-previous[0] + 3 * current[0] - 3 * following[0] + after_following[0]) * t_cubed
+                )
+                y = 0.5 * (
+                    2 * current[1]
+                    + (-previous[1] + following[1]) * t
+                    + (2 * previous[1] - 5 * current[1] + 4 * following[1] - after_following[1]) * t_squared
+                    + (-previous[1] + 3 * current[1] - 3 * following[1] + after_following[1]) * t_cubed
+                )
+                smoothed.append((x, y))
+        return smoothed
 
     @staticmethod
     def _draw_dashed_line(draw, coords, fill, width, dash):
