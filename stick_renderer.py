@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
 # Adjust these weights to tune the all-gates placement objective.
 # Wire length is measured in diagram units; the other weights reward each
@@ -9,6 +9,169 @@ GATE_ORDERING_WEIGHTS = {
     'direct_connections': 250.0,
     'shared_diffusion': 180.0,
 }
+
+
+class _PillowCanvas:
+    def __init__(self):
+        self.items = []
+
+    def delete(self, tag):
+        if tag == 'all':
+            self.items.clear()
+            return
+        self.items = [
+            item for item in self.items
+            if tag not in item[2].get('tags', ())
+        ]
+
+    def tag_raise(self, tag):
+        tagged = []
+        other = []
+        for item in self.items:
+            tags = item[2].get('tags', ())
+            if isinstance(tags, str):
+                tags = (tags,)
+            (tagged if tag in tags else other).append(item)
+        self.items = other + tagged
+
+    def create_line(self, *coords, **options):
+        self.items.append(('line', coords, options))
+
+    def create_oval(self, *coords, **options):
+        self.items.append(('oval', coords, options))
+
+    def create_text(self, *coords, **options):
+        self.items.append(('text', coords, options))
+
+    def to_image(self, Image, ImageDraw, ImageFont):
+        fonts = {}
+
+        def font_for(options):
+            font_spec = options.get('font', ('Arial', 12))
+            size = max(1, int(font_spec[1])) if isinstance(font_spec, tuple) else 12
+            bold = isinstance(font_spec, tuple) and 'bold' in font_spec[2:]
+            key = (size, bold)
+            if key not in fonts:
+                try:
+                    font_name = 'arialbd.ttf' if bold else 'arial.ttf'
+                    fonts[key] = ImageFont.truetype(font_name, size)
+                except OSError:
+                    fonts[key] = ImageFont.load_default(size=size)
+            return fonts[key]
+
+        bounds = [float('inf'), float('inf'), float('-inf'), float('-inf')]
+        for kind, coords, options in self.items:
+            if kind == 'text':
+                x, y = coords[:2]
+                font = font_for(options)
+                text_bounds = font.getbbox(str(options.get('text', '')))
+                text_width = text_bounds[2] - text_bounds[0]
+                text_height = text_bounds[3] - text_bounds[1]
+                anchor = options.get('anchor', 'center')
+                horizontal_anchor = 'w' if anchor.endswith('w') else 'e' if anchor.endswith('e') else 'center'
+                vertical_anchor = 'n' if anchor.startswith('n') else 's' if anchor.startswith('s') else 'center'
+                if horizontal_anchor == 'w':
+                    left = x
+                elif horizontal_anchor == 'e':
+                    left = x - text_width
+                else:
+                    left = x - text_width / 2
+                if vertical_anchor == 'n':
+                    top = y
+                elif vertical_anchor == 's':
+                    top = y - text_height
+                else:
+                    top = y - text_height / 2
+                item_bounds = (left, top, left + text_width, top + text_height)
+            else:
+                stroke = max(1, int(options.get('width', 1))) / 2 + 1
+                xs, ys = coords[::2], coords[1::2]
+                item_bounds = (
+                    min(xs) - stroke, min(ys) - stroke,
+                    max(xs) + stroke, max(ys) + stroke
+                )
+            bounds[0] = min(bounds[0], item_bounds[0])
+            bounds[1] = min(bounds[1], item_bounds[1])
+            bounds[2] = max(bounds[2], item_bounds[2])
+            bounds[3] = max(bounds[3], item_bounds[3])
+
+        if not self.items:
+            raise ValueError("There is no stick diagram to export.")
+
+        padding = 16
+        left = int(bounds[0]) - padding
+        top = int(bounds[1]) - padding
+        right = int(bounds[2] + 0.999) + padding
+        bottom = int(bounds[3] + 0.999) + padding
+        image = Image.new('RGBA', (right - left, bottom - top), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+
+        for kind, coords, options in self.items:
+            fill = options.get('fill')
+            shifted = tuple(
+                coordinate - (left if index % 2 == 0 else top)
+                for index, coordinate in enumerate(coords)
+            )
+            if kind == 'line':
+                width = max(1, int(options.get('width', 1)))
+                dash = options.get('dash')
+                if dash:
+                    self._draw_dashed_line(draw, shifted, fill, width, dash)
+                else:
+                    draw.line(shifted, fill=fill, width=width, joint='curve')
+            elif kind == 'oval':
+                draw.ellipse(
+                    shifted, fill=fill,
+                    outline=options.get('outline'),
+                    width=max(1, int(options.get('width', 1)))
+                )
+            elif kind == 'text':
+                x, y = shifted[:2]
+                text = str(options.get('text', ''))
+                font = font_for(options)
+                text_bounds = font.getbbox(text)
+                text_width = text_bounds[2] - text_bounds[0]
+                text_height = text_bounds[3] - text_bounds[1]
+                anchor = options.get('anchor', 'center')
+                horizontal_anchor = 'w' if anchor.endswith('w') else 'e' if anchor.endswith('e') else 'center'
+                vertical_anchor = 'n' if anchor.startswith('n') else 's' if anchor.startswith('s') else 'center'
+                if horizontal_anchor == 'w':
+                    x -= text_bounds[0]
+                elif horizontal_anchor == 'e':
+                    x -= text_width + text_bounds[0]
+                else:
+                    x -= text_width / 2 + text_bounds[0]
+                if vertical_anchor == 'n':
+                    y -= text_bounds[1]
+                elif vertical_anchor == 's':
+                    y -= text_height + text_bounds[1]
+                else:
+                    y -= text_height / 2 + text_bounds[1]
+                draw.text((x, y), text, fill=fill, font=font)
+
+        return image
+
+    @staticmethod
+    def _draw_dashed_line(draw, coords, fill, width, dash):
+        for x1, y1, x2, y2 in zip(coords[::2], coords[1::2], coords[2::2], coords[3::2]):
+            dx, dy = x2 - x1, y2 - y1
+            length = (dx * dx + dy * dy) ** 0.5
+            position = 0.0
+            dash_index = 0
+            while position < length:
+                segment = min(float(dash[dash_index % len(dash)]), length - position)
+                if dash_index % 2 == 0:
+                    start_ratio = position / length
+                    end_ratio = (position + segment) / length
+                    draw.line(
+                        (
+                            x1 + dx * start_ratio, y1 + dy * start_ratio,
+                            x1 + dx * end_ratio, y1 + dy * end_ratio
+                        ),
+                        fill=fill, width=width
+                    )
+                position += segment
+                dash_index += 1
 
 
 def _mirror_gate_stick_layout(gate):
@@ -25,19 +188,21 @@ def _mirror_gate_stick_layout(gate):
     ]
     mirrored['p_sd'] = list(reversed(gate['p_sd']))
     mirrored['n_sd'] = list(reversed(gate['n_sd']))
+    if 'pin_order' in gate:
+        mirrored['pin_order'] = list(reversed(gate['pin_order']))
     mirrored['mirrored'] = True
     return mirrored
 
 
-def optimize_gate_placement(nodes, wires):
-    """Return a locally optimized sequence of (node, mirrored, output_left)."""
+def optimize_gate_placement(nodes, wires, allow_input_swapping=False):
+    """Return locally optimized (node, mirrored, output_left, input_order) entries."""
     layouts = {node['id']: get_gate_stick_layout(node) for node in nodes}
     node_by_id = {node['id']: node for node in nodes}
     gate_ids = set(node_by_id)
     weights = GATE_ORDERING_WEIGHTS
 
     def boundary_type(placement, side, contact_group):
-        node, mirrored, _ = placement
+        node, mirrored, _, _ = placement
         layout = layouts[node['id']]
         idx = 0 if side == 'left' else len(layout['inputs'])
         if mirrored:
@@ -51,8 +216,9 @@ def optimize_gate_placement(nodes, wires):
             None
         )
 
-    def input_x(gate_start, layout, pin_idx, mirrored):
-        physical_pin = len(layout['inputs']) - 1 - pin_idx if mirrored else pin_idx
+    def input_x(gate_start, pin_idx, mirrored, input_order):
+        physical_order = list(reversed(input_order)) if mirrored else input_order
+        physical_pin = physical_order.index(pin_idx)
         return gate_start + 85 + physical_pin * 90
 
     def output_x(gate_start, layout, output_left):
@@ -69,9 +235,9 @@ def optimize_gate_placement(nodes, wires):
         starts = {}
         placement_indices = {}
         cursor = 80
-        for index, (node, mirrored, output_left) in enumerate(placement):
+        for index, (node, mirrored, output_left, input_order) in enumerate(placement):
             layout = layouts[node['id']]
-            starts[node['id']] = (cursor, mirrored, output_left)
+            starts[node['id']] = (cursor, mirrored, output_left, input_order)
             placement_indices[node['id']] = index
             cursor += (len(layout['inputs']) + 1) * 90 + 60 + 80
         rail_end = cursor - 80
@@ -83,7 +249,7 @@ def optimize_gate_placement(nodes, wires):
             if target_id not in node_by_id:
                 if source_id in starts and wire.get('to_pin') is not None:
                     source_layout = layouts[source_id]
-                    source_start, _, source_output_left = starts[source_id]
+                    source_start, _, source_output_left, _ = starts[source_id]
                     source_index = placement_indices[source_id]
                     sink_x = 35 if source_output_left else rail_end + 45
                     wire_length += abs(
@@ -94,11 +260,18 @@ def optimize_gate_placement(nodes, wires):
                 continue
 
             target_layout = layouts[target_id]
-            target_start, target_mirrored, _ = starts[target_id]
+            target_start, target_mirrored, _, target_input_order = starts[target_id]
             target_pin = wire.get('to_pin', 0)
-            target_x = input_x(target_start, target_layout, target_pin, target_mirrored)
+            physical_order = (
+                list(reversed(target_input_order))
+                if target_mirrored
+                else target_input_order
+            )
+            target_x = input_x(
+                target_start, target_pin, target_mirrored, target_input_order
+            )
             if source_id in starts:
-                source_start, _, source_output_left = starts[source_id]
+                source_start, _, source_output_left, _ = starts[source_id]
                 source_layout = layouts[source_id]
                 source_index = placement_indices[source_id]
                 target_index = placement_indices[target_id]
@@ -107,13 +280,9 @@ def optimize_gate_placement(nodes, wires):
                     output_x(source_start, source_layout, source_output_left) - target_x
                 )
                 if target_index == source_index + 1 and not source_output_left:
-                    direct = target_pin == (
-                        len(target_layout['inputs']) - 1 if target_mirrored else 0
-                    )
+                    direct = target_pin == physical_order[0]
                 elif target_index == source_index - 1 and source_output_left:
-                    direct = target_pin == (
-                        0 if target_mirrored else len(target_layout['inputs']) - 1
-                    )
+                    direct = target_pin == physical_order[-1]
                 if direct:
                     span_min, span_max = sorted(
                         (
@@ -134,9 +303,7 @@ def optimize_gate_placement(nodes, wires):
             else:
                 wire_length += abs((80 - 35) - target_x)
                 target_index = placement_indices[target_id]
-                is_first_pin = target_pin == (
-                    len(target_layout['inputs']) - 1 if target_mirrored else 0
-                )
+                is_first_pin = target_pin == physical_order[0]
                 crosses_output_contact = any(
                     45 < starts[target_id][0] + 40 + contact['idx'] * 90 < target_x
                     for contact in target_layout['n_contacts']
@@ -180,20 +347,22 @@ def optimize_gate_placement(nodes, wires):
             degree[wire['to_id']] += 1
 
     seeds = [
-        [(node, False, False) for node in nodes],
-        [(node, False, False) for node in reversed(nodes)],
+        [(node, False, False, tuple(range(len(layouts[node['id']]['inputs'])))) for node in nodes],
+        [(node, False, False, tuple(range(len(layouts[node['id']]['inputs'])))) for node in reversed(nodes)],
         [
-            (node, False, False)
+            (node, False, False, tuple(range(len(layouts[node['id']]['inputs']))))
             for node in sorted(nodes, key=lambda item: (-degree[item['id']], item['id']))
         ],
     ]
     best_placement = seeds[0]
     best_score = score(best_placement)
+    max_inputs = max(len(layout['inputs']) for layout in layouts.values())
+    max_iterations = max(4, len(nodes) * 2, max_inputs * 2 if allow_input_swapping else 0)
 
     for seed in seeds:
         current = list(seed)
         current_score = score(current)
-        for _ in range(max(4, len(nodes) * 2)):
+        for _ in range(max_iterations):
             best_move = None
             best_move_score = current_score
             size = len(current)
@@ -210,16 +379,30 @@ def optimize_gate_placement(nodes, wires):
                     best_move, best_move_score = candidate, candidate_score
             for i in range(size):
                 candidate = list(current)
-                node, mirrored, output_left = candidate[i]
-                candidate[i] = (node, not mirrored, output_left)
+                node, mirrored, output_left, input_order = candidate[i]
+                candidate[i] = (node, not mirrored, output_left, input_order)
                 candidate_score = score(candidate)
                 if candidate_score < best_move_score:
                     best_move, best_move_score = candidate, candidate_score
                 candidate = list(current)
-                candidate[i] = (node, mirrored, not output_left)
+                candidate[i] = (node, mirrored, not output_left, input_order)
                 candidate_score = score(candidate)
                 if candidate_score < best_move_score:
                     best_move, best_move_score = candidate, candidate_score
+                if allow_input_swapping and node['type'] in ('NAND', 'NOR'):
+                    for first in range(len(input_order)):
+                        for second in range(first + 1, len(input_order)):
+                            swapped_order = list(input_order)
+                            swapped_order[first], swapped_order[second] = (
+                                swapped_order[second], swapped_order[first]
+                            )
+                            candidate = list(current)
+                            candidate[i] = (
+                                node, mirrored, output_left, tuple(swapped_order)
+                            )
+                            candidate_score = score(candidate)
+                            if candidate_score < best_move_score:
+                                best_move, best_move_score = candidate, candidate_score
             if best_move is None:
                 break
             current, current_score = best_move, best_move_score
@@ -327,6 +510,19 @@ class StickDiagramWindow(tk.Toplevel):
         self.gate_combo.pack(side=tk.LEFT, padx=5)
         self.gate_combo.bind("<<ComboboxSelected>>", lambda e: self.render_stick_diagram())
 
+        self.allow_input_swapping_var = tk.BooleanVar(value=False)
+        control_bar = ttk.Frame(self, padding=(8, 0, 8, 4))
+        control_bar.pack(side=tk.TOP, fill=tk.X)
+        ttk.Checkbutton(
+            control_bar,
+            text="Optimize NAND/NOR input order",
+            variable=self.allow_input_swapping_var,
+            command=self.render_stick_diagram
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            control_bar, text="Export PNG", command=self.export_png
+        ).pack(side=tk.RIGHT, padx=5)
+
         leg_frame = ttk.Frame(top_bar)
         leg_frame.pack(side=tk.RIGHT, padx=5)
         
@@ -379,6 +575,46 @@ class StickDiagramWindow(tk.Toplevel):
     def to_screen(self, x, y):
         return (x * self.zoom + self.pan_x, y * self.zoom + self.pan_y)
 
+    def export_png(self):
+        file_path = filedialog.asksaveasfilename(
+            parent=self,
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png")],
+            initialfile="stick_diagram.png"
+        )
+        if not file_path:
+            return
+
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            messagebox.showerror(
+                "Export Failed",
+                "PNG export requires Pillow. Install it with: pip install Pillow",
+                parent=self
+            )
+            return
+
+        original_canvas = self.canvas
+        original_view = self.zoom, self.pan_x, self.pan_y
+        try:
+            self.canvas = _PillowCanvas()
+            self.zoom = 1.0
+            self.pan_x = 0.0
+            self.pan_y = 0.0
+            self.render_stick_diagram()
+            image = self.canvas.to_image(Image, ImageDraw, ImageFont)
+            image.save(file_path, format="PNG")
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Export Failed", f"Could not save PNG: {error}", parent=self)
+            return
+        finally:
+            self.canvas = original_canvas
+            self.zoom, self.pan_x, self.pan_y = original_view
+        messagebox.showinfo(
+            "Export Success", "Full stick diagram exported with a transparent background.", parent=self
+        )
+
     def draw_contact_cut(self, x, y):
         sx, sy = self.to_screen(x, y)
         r = max(5, int(7 * self.zoom))
@@ -403,20 +639,24 @@ class StickDiagramWindow(tk.Toplevel):
         weight_key = tuple(
             (key, GATE_ORDERING_WEIGHTS[key])
             for key in ('wire_length', 'direct_connections', 'shared_diffusion')
-        )
+        ) + (self.allow_input_swapping_var.get(),)
         if getattr(self, '_gate_placement_weight_key', None) != weight_key:
             self._gate_placement = optimize_gate_placement(
-                self.logic_nodes, self.graph_data.get('wires', [])
+                self.logic_nodes,
+                self.graph_data.get('wires', []),
+                allow_input_swapping=self.allow_input_swapping_var.get()
             )
             self._gate_placement_weight_key = weight_key
         placement_by_id = {
-            node['id']: (mirrored, output_left)
-            for node, mirrored, output_left in self._gate_placement
+            node['id']: (mirrored, output_left, input_order)
+            for node, mirrored, output_left, input_order in self._gate_placement
         }
         if sel_idx == 0:
             target_gates = []
-            for node, mirrored, output_left in self._gate_placement:
+            for node, mirrored, output_left, input_order in self._gate_placement:
                 gate = get_gate_stick_layout(node)
+                gate['pin_order'] = list(input_order)
+                gate['inputs'] = [gate['inputs'][pin] for pin in input_order]
                 if mirrored:
                     gate = _mirror_gate_stick_layout(gate)
                 gate['output_left'] = output_left
@@ -424,7 +664,9 @@ class StickDiagramWindow(tk.Toplevel):
         else:
             node = self.logic_nodes[sel_idx - 1]
             gate = get_gate_stick_layout(node)
-            mirrored, output_left = placement_by_id[node['id']]
+            mirrored, output_left, input_order = placement_by_id[node['id']]
+            gate['pin_order'] = list(input_order)
+            gate['inputs'] = [gate['inputs'][pin] for pin in input_order]
             if mirrored:
                 gate = _mirror_gate_stick_layout(gate)
             gate['output_left'] = output_left
@@ -505,9 +747,10 @@ class StickDiagramWindow(tk.Toplevel):
                 'gate_index': gate_index,
                 'gate': gate,
                 'node_x_coords': node_x_coords,
-                'input_poly_x_coords': (
-                    list(reversed(poly_x_coords)) if gate.get('mirrored') else poly_x_coords
-                ),
+                'input_poly_x_coords': [
+                    poly_x_coords[gate.get('pin_order', list(range(num_inputs))).index(pin)]
+                    for pin in range(num_inputs)
+                ],
                 'mirrored': gate.get('mirrored', False),
                 'output_left': gate.get('output_left', False),
                 'input_via_y': y_well + 10,
