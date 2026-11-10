@@ -69,7 +69,10 @@ def simplify_path(path):
 # =====================================================================
 # ITERATIVE LOGICAL EFFORT CALCULATION ENGINE (Topological Pin Sizing)
 # =====================================================================
-def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_path=None):
+def calculate_logical_effort(
+    graph_data, manual_path_index=0, custom_graphical_path=None,
+    use_bruteforce=False, progress_callback=None
+):
     nodes = {n['id']: n for n in graph_data['nodes']}
     wires = graph_data['wires']
 
@@ -79,7 +82,10 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     output_nodes = [n for n in graph_data['nodes'] if n['type'] == 'OUTPUT']
     input_nodes = [n for n in graph_data['nodes'] if n['type'] == 'INPUT']
 
-    empty_summary = {"ideal_D": 0.0, "actual_D": 0.0, "N_opt": 0.0, "N_opt_int": 0, "critical_full_path": []}
+    empty_summary = {
+        "ideal_D": 0.0, "actual_D": 0.0, "brute_force_D": None,
+        "N_opt": 0.0, "N_opt_int": 0, "critical_full_path": []
+    }
     if not logic_nodes:
         return empty_summary, "No logic gates found in schematic.", {}, ["[Auto: No paths found]"]
 
@@ -151,6 +157,17 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         reverse=True,
     )
 
+    def lookup_cin(node_id, cin_values=None):
+        cin_values = {} if cin_values is None else cin_values
+        if node_id in cin_values:
+            return cin_values[node_id]
+        if node_id in current_cin:
+            return current_cin[node_id]
+        node = nodes.get(node_id)
+        if node is None:
+            return 1.0
+        return float(node.get('size', 1.0))
+
     def ideal_gate_cins(f_hat, c_load):
         cin_values = current_cin.copy()
         for nid in reverse_stage_order:
@@ -159,7 +176,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
             output_cap = sum(
                 float(nodes[sid].get('cl', 120.0))
                 if nodes[sid]['type'] == 'OUTPUT'
-                else get_pin_cin(sid, cin_values.get(sid, current_cin[sid]))
+                else get_pin_cin(sid, lookup_cin(sid, cin_values))
                 for sid, _ in out_edges[nid]
             )
             if output_cap <= 0:
@@ -336,7 +353,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
             if nodes[sid]['type'] == 'OUTPUT':
                 output_cap += float(nodes[sid].get('cl', 120.0))
             else:
-                output_cap += get_pin_cin(sid, cin_values.get(sid, current_cin[sid]))
+                output_cap += get_pin_cin(sid, lookup_cin(sid, cin_values))
         return output_cap if output_cap > 0 else c_load
 
     def get_path_stage_efforts(cin_values):
@@ -380,7 +397,7 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     rounded_F = math.prod(final_stage_f)
     f_hat_rounded = rounded_F ** (1.0 / N) if N > 0 and rounded_F > 0 else 0.0
     ideal_D = N * ideal_f_hat + P
-    actual_D = sum(final_stage_f) + P
+    equal_effort_D = sum(final_stage_f) + P
     stage_f_hat = {stage_map[nid]: f_hat_rounded for nid in critical_logic_path}
     unrounded_cin = {}
     for nid in rev_topo_logic_nodes:
@@ -388,6 +405,218 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
         output_cap = get_gate_output_cap(nid, current_cin)
         gate_f_hat = stage_f_hat.get(stage_map.get(nid), f_hat_rounded)
         unrounded_cin[nid] = (g * output_cap / gate_f_hat) if gate_f_hat > 0 else current_cin[nid]
+
+    def brute_force_optimize_path(path_ids, base_sizes):
+        if not path_ids:
+            return base_sizes.copy(), equal_effort_D
+
+        def transistor_size_unit(nid):
+            g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+            return 3.0 * g
+
+        def as_int_multiplier(value):
+            return max(1, int(round(float(value))))
+
+        def evaluate_path_delay(sizes_map):
+            test_sizes = current_cin.copy()
+            for key, value in sizes_map.items():
+                test_sizes[key] = float(value)
+            stage_efforts = []
+            for nid in path_ids:
+                g = get_gate_info(nodes[nid]['type'], nodes[nid]['inputs'])[0]
+                input_cap = get_pin_cin(nid, test_sizes.get(nid, current_cin.get(nid, float(nodes[nid].get('size', 1.0)))))
+                output_cap = get_gate_output_cap(nid, test_sizes)
+                stage_efforts.append(g * output_cap / input_cap if input_cap > 0 else 0.0)
+            return sum(stage_efforts) + P
+
+        stage_groups = {}
+        for nid in current_cin:
+            stage_groups.setdefault(stage_map.get(nid, 1), []).append(nid)
+
+        optimizable_groups = {}
+        best_cin = current_cin.copy()
+        for nid in direct_input_gate_ids:
+            unit_size = transistor_size_unit(nid)
+            best_cin[nid] = as_int_multiplier(current_cin[nid] / unit_size) * unit_size
+
+        for stage, group_ids in stage_groups.items():
+            adjustable_ids = [nid for nid in group_ids if nid not in direct_input_gate_ids]
+            if not adjustable_ids:
+                continue
+            stage_multiplier = as_int_multiplier(
+                sum(
+                    float(base_sizes.get(nid, current_cin[nid])) / transistor_size_unit(nid)
+                    for nid in adjustable_ids
+                )
+                / len(adjustable_ids)
+            )
+            max_multiplier = max(
+                as_int_multiplier(
+                    max(1000.0, current_cin[nid]) / transistor_size_unit(nid)
+                )
+                for nid in adjustable_ids
+            )
+            optimizable_groups[stage] = (adjustable_ids, stage_multiplier, max_multiplier)
+            for nid in adjustable_ids:
+                best_cin[nid] = stage_multiplier * transistor_size_unit(nid)
+
+        best_delay = evaluate_path_delay(best_cin)
+
+        total_candidate_evaluations = sum(
+            max_multiplier - 1
+            for _, _, max_multiplier in optimizable_groups.values()
+        ) + sum(
+            first_max * second_max - 1
+            for first_index, (_, _, first_max) in enumerate(optimizable_groups.values())
+            for _, _, second_max in list(optimizable_groups.values())[first_index + 1:]
+        )
+        completed_candidate_evaluations = 0
+        last_reported_progress = -1
+
+        def report_progress():
+            nonlocal last_reported_progress
+            if not progress_callback:
+                return
+            if total_candidate_evaluations:
+                progress = int(
+                    99 * (1 - math.exp(
+                        -completed_candidate_evaluations / total_candidate_evaluations
+                    ))
+                )
+            else:
+                progress = 99
+            if progress > last_reported_progress:
+                progress_callback(progress)
+                last_reported_progress = progress
+
+        stage_distances = {}
+        for stage, (group_ids, _, max_multiplier) in optimizable_groups.items():
+            baseline_multipliers = [
+                float(base_sizes.get(nid, current_cin[nid])) / transistor_size_unit(nid)
+                for nid in group_ids
+            ]
+            stage_distances[stage] = {
+                multiplier: sum(abs(multiplier - baseline) for baseline in baseline_multipliers)
+                for multiplier in range(1, max_multiplier + 1)
+            }
+        current_distance = sum(
+            stage_distances[stage][multiplier]
+            for stage, (_, multiplier, _) in optimizable_groups.items()
+        )
+
+        def is_better_candidate(delay, distance, best_delay_value, best_distance):
+            if delay < best_delay_value - 1e-9:
+                return True
+            return (
+                math.isclose(delay, best_delay_value, rel_tol=0.0, abs_tol=1e-9)
+                and distance < best_distance - 1e-9
+            )
+
+        improved = True
+        while improved:
+            improved = False
+            for stage, (group_ids, current_multiplier, max_multiplier) in optimizable_groups.items():
+                local_best_multiplier = current_multiplier
+                local_best_delay = best_delay
+                local_best_distance = current_distance
+                for scaled_multiplier in range(1, max_multiplier + 1):
+                    if scaled_multiplier == current_multiplier:
+                        continue
+                    trial = best_cin.copy()
+                    for nid in group_ids:
+                        trial[nid] = scaled_multiplier * transistor_size_unit(nid)
+                    trial_delay = evaluate_path_delay(trial)
+                    completed_candidate_evaluations += 1
+                    report_progress()
+                    trial_distance = (
+                        current_distance
+                        - stage_distances[stage][current_multiplier]
+                        + stage_distances[stage][scaled_multiplier]
+                    )
+                    if is_better_candidate(
+                        trial_delay, trial_distance, local_best_delay, local_best_distance
+                    ):
+                        local_best_multiplier = scaled_multiplier
+                        local_best_delay = trial_delay
+                        local_best_distance = trial_distance
+                if local_best_multiplier != current_multiplier:
+                    for nid in group_ids:
+                        best_cin[nid] = local_best_multiplier * transistor_size_unit(nid)
+                    optimizable_groups[stage] = (
+                        group_ids, local_best_multiplier, max_multiplier
+                    )
+                    best_delay = local_best_delay
+                    current_distance = local_best_distance
+                    improved = True
+
+        stages = list(optimizable_groups)
+        improved = True
+        while improved:
+            improved = False
+            for first_index, first_stage in enumerate(stages):
+                first_ids, first_multiplier, first_max = optimizable_groups[first_stage]
+                for second_stage in stages[first_index + 1:]:
+                    second_ids, second_multiplier, second_max = optimizable_groups[second_stage]
+                    local_best = (first_multiplier, second_multiplier)
+                    local_best_delay = best_delay
+                    local_best_distance = current_distance
+
+                    for first_candidate in range(1, first_max + 1):
+                        for second_candidate in range(1, second_max + 1):
+                            if (
+                                first_candidate == first_multiplier
+                                and second_candidate == second_multiplier
+                            ):
+                                continue
+                            trial = best_cin.copy()
+                            for nid in first_ids:
+                                trial[nid] = first_candidate * transistor_size_unit(nid)
+                            for nid in second_ids:
+                                trial[nid] = second_candidate * transistor_size_unit(nid)
+                            trial_delay = evaluate_path_delay(trial)
+                            completed_candidate_evaluations += 1
+                            report_progress()
+                            trial_distance = (
+                                current_distance
+                                - stage_distances[first_stage][first_multiplier]
+                                - stage_distances[second_stage][second_multiplier]
+                                + stage_distances[first_stage][first_candidate]
+                                + stage_distances[second_stage][second_candidate]
+                            )
+                            if is_better_candidate(
+                                trial_delay, trial_distance, local_best_delay, local_best_distance
+                            ):
+                                local_best = (first_candidate, second_candidate)
+                                local_best_delay = trial_delay
+                                local_best_distance = trial_distance
+
+                    if local_best != (first_multiplier, second_multiplier):
+                        first_multiplier, second_multiplier = local_best
+                        for nid in first_ids:
+                            best_cin[nid] = first_multiplier * transistor_size_unit(nid)
+                        for nid in second_ids:
+                            best_cin[nid] = second_multiplier * transistor_size_unit(nid)
+                        optimizable_groups[first_stage] = (
+                            first_ids, first_multiplier, first_max
+                        )
+                        optimizable_groups[second_stage] = (
+                            second_ids, second_multiplier, second_max
+                        )
+                        best_delay = local_best_delay
+                        current_distance = local_best_distance
+                        improved = True
+
+        if progress_callback:
+            progress_callback(100)
+        return best_cin, best_delay
+
+    brute_force_cin = current_cin.copy()
+    brute_force_D = None
+    if use_bruteforce and critical_logic_path:
+        brute_force_cin, brute_force_D = brute_force_optimize_path(critical_logic_path, current_cin)
+        current_cin = brute_force_cin.copy()
+        final_stage_f = get_path_stage_efforts(current_cin)
+        brute_force_D = sum(final_stage_f) + P
 
     p_avg = P / N if N > 0 else 1.0
     def solve_optimal_f_hat(p_val):
@@ -409,7 +638,9 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
 
     summary = {
         "ideal_D": ideal_D,
-        "actual_D": actual_D,
+        "actual_D": equal_effort_D,
+        "equal_effort_D": equal_effort_D,
+        "brute_force_D": brute_force_D,
         "N_opt": N_opt,
         "N_opt_int": N_opt_int,
         "critical_full_path": critical_full_path
@@ -449,7 +680,9 @@ def calculate_logical_effort(graph_data, manual_path_index=0, custom_graphical_p
     for idx, nid in enumerate(critical_logic_path):
         lines.append(f"   Stage {stage_map.get(nid, '?')} Effort (f_{idx+1}) = {final_stage_f[idx]:.3f}")
     lines.append(f"   Total Parasitic Delay P  = {P:.3f}")
-    lines.append(f"   ACTUAL PATH DELAY D      = {actual_D:.3f} tau")
+    lines.append(f"   EQUAL EFFORT ITERATED DELAY = {equal_effort_D:.3f} tau")
+    brute_force_delay_text = f"{brute_force_D:.3f} tau" if brute_force_D is not None else "----"
+    lines.append(f"   BRUTE FORCE DELAY          = {brute_force_delay_text}")
 
     lines.append("\n6. Final Transistor Widths & Input Capacitances (Cin):")
     all_logic_ids = sorted(
@@ -1680,9 +1913,20 @@ class VLSIWorkbenchApp(tk.Tk):
         self.path_combo.pack(side=tk.LEFT, padx=2)
         self.path_combo.bind("<<ComboboxSelected>>", lambda e: self.on_path_combo_selected())
 
-        ttk.Button(row3, text="⚡ Calculate & Size Effort", command=self.run_calc).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(row3, text="⚡ Equal Effort Iterated Delay", command=self.run_calc).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(row3, text="🧪 Brute Force Delay", command=lambda: self.run_calc(use_bruteforce=True)).pack(side=tk.RIGHT, padx=5)
         ttk.Button(row3, text="🎨 Generate Stick Diagram", command=self.show_stick_diagram_popup).pack(side=tk.RIGHT, padx=2)
         ttk.Button(row3, text="📊 Truth Table", command=self.show_truth_table_popup).pack(side=tk.RIGHT, padx=2)
+
+        self.bruteforce_progress_frame = ttk.Frame(toolbar)
+        self.bruteforce_progress_label = ttk.Label(
+            self.bruteforce_progress_frame, text="Brute force sizing: 0%"
+        )
+        self.bruteforce_progress_label.pack(side=tk.LEFT, padx=(3, 8))
+        self.bruteforce_progress = ttk.Progressbar(
+            self.bruteforce_progress_frame, mode="determinate", maximum=100, length=220
+        )
+        self.bruteforce_progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True)
@@ -1711,13 +1955,17 @@ class VLSIWorkbenchApp(tk.Tk):
         self.lbl_ideal_d = ttk.Label(summary_card, text="-- τ", font=("Arial", 10, "bold"), foreground="#89b4fa")
         self.lbl_ideal_d.grid(row=0, column=1, sticky=tk.E, padx=(10, 0))
 
-        ttk.Label(summary_card, text="Actual Delay (Post-sizing):", font=("Arial", 9, "bold")).grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(summary_card, text="Equal Effort Iterated Delay:", font=("Arial", 9, "bold")).grid(row=1, column=0, sticky=tk.W, pady=2)
         self.lbl_actual_d = ttk.Label(summary_card, text="-- τ", font=("Arial", 10, "bold"), foreground="#a6e3a1")
         self.lbl_actual_d.grid(row=1, column=1, sticky=tk.E, padx=(10, 0))
 
-        ttk.Label(summary_card, text="Calculated N_opt:", font=("Arial", 9, "bold")).grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(summary_card, text="Brute Force Delay:", font=("Arial", 9, "bold")).grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.lbl_bruteforce_d = ttk.Label(summary_card, text="-- τ", font=("Arial", 10, "bold"), foreground="#f5c2e7")
+        self.lbl_bruteforce_d.grid(row=2, column=1, sticky=tk.E, padx=(10, 0))
+
+        ttk.Label(summary_card, text="Calculated N_opt:", font=("Arial", 9, "bold")).grid(row=3, column=0, sticky=tk.W, pady=2)
         self.lbl_n_opt = ttk.Label(summary_card, text="-- stages", font=("Arial", 10, "bold"), foreground="#fab387")
-        self.lbl_n_opt.grid(row=2, column=1, sticky=tk.E, padx=(10, 0))
+        self.lbl_n_opt.grid(row=3, column=1, sticky=tk.E, padx=(10, 0))
 
         summary_card.columnconfigure(0, weight=1)
 
@@ -1969,7 +2217,7 @@ class VLSIWorkbenchApp(tk.Tk):
             self.canvas.render()
             messagebox.showinfo("Import Success", "Schematic loaded successfully!")
 
-    def run_calc(self):
+    def run_calc(self, use_bruteforce=False):
         graph_data = self.get_graph_export()
         
         raw_idx = self.path_combo.current()
@@ -1981,9 +2229,30 @@ class VLSIWorkbenchApp(tk.Tk):
         else:
             manual_idx = raw_idx
 
-        summary, output_text, cin_dict, path_options = calculate_logical_effort(
-            graph_data, manual_path_index=manual_idx, custom_graphical_path=self.custom_graphical_path
-        )
+        if use_bruteforce:
+            self.bruteforce_progress.configure(value=0)
+            self.bruteforce_progress_label.config(text="Brute force sizing: 0%")
+            self.bruteforce_progress_frame.pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
+            self.update_idletasks()
+
+        def update_bruteforce_progress(progress):
+            self.bruteforce_progress.configure(value=progress)
+            self.bruteforce_progress_label.config(
+                text=f"Brute force sizing: {progress}%"
+            )
+            self.update_idletasks()
+
+        try:
+            summary, output_text, cin_dict, path_options = calculate_logical_effort(
+                graph_data,
+                manual_path_index=manual_idx,
+                custom_graphical_path=self.custom_graphical_path,
+                use_bruteforce=use_bruteforce,
+                progress_callback=update_bruteforce_progress if use_bruteforce else None
+            )
+        finally:
+            if use_bruteforce:
+                self.bruteforce_progress_frame.pack_forget()
 
         self.path_combo['values'] = path_options
 
@@ -1995,7 +2264,11 @@ class VLSIWorkbenchApp(tk.Tk):
             self.path_combo.current(0)
 
         self.lbl_ideal_d.config(text=f"{summary.get('ideal_D', 0.0):.3f} τ")
-        self.lbl_actual_d.config(text=f"{summary.get('actual_D', 0.0):.3f} τ")
+        self.lbl_actual_d.config(text=f"{summary.get('equal_effort_D', summary.get('actual_D', 0.0)):.3f} τ")
+        brute_force_delay = summary.get("brute_force_D")
+        self.lbl_bruteforce_d.config(
+            text=f"{brute_force_delay:.3f} τ" if brute_force_delay is not None else "----"
+        )
         self.lbl_n_opt.config(text=f"{summary.get('N_opt_int', 0)} stages ({summary.get('N_opt', 0.0):.2f})")
 
         self.canvas.critical_full_path = summary.get("critical_full_path", [])
@@ -2008,7 +2281,7 @@ class VLSIWorkbenchApp(tk.Tk):
             for nid, new_cin in cin_dict.items():
                 if nid in self.canvas.nodes:
                     node = self.canvas.nodes[nid]
-                    node['size'] = float(round(new_cin, 1))
+                    node['size'] = float(new_cin) if use_bruteforce else float(round(new_cin, 1))
 
             self.canvas.render()
             if self.canvas.selected_node_id:
