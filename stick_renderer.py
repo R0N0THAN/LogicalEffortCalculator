@@ -9,6 +9,8 @@ GATE_ORDERING_WEIGHTS = {
     'direct_connections': 250.0,
     'shared_diffusion': 180.0,
 }
+LAMBDA_PER_RULE_UNIT = 8
+HORIZONTAL_STICK_LINE_COUNT = 5
 
 
 class _PillowCanvas:
@@ -569,6 +571,17 @@ def get_gate_stick_layout(node):
     }
 
 
+def estimate_gate_size_lambda(gate):
+    """Estimate gate area using five horizontal tracks and each PMOS diffusion position."""
+    horizontal_dimension = HORIZONTAL_STICK_LINE_COUNT * LAMBDA_PER_RULE_UNIT
+    vertical_dimension = len(gate['p_sd']) * LAMBDA_PER_RULE_UNIT
+    return {
+        'width': horizontal_dimension,
+        'height': vertical_dimension,
+        'area': horizontal_dimension * vertical_dimension
+    }
+
+
 # =====================================================================
 # STICK DIAGRAM WINDOW RENDERER
 # =====================================================================
@@ -595,6 +608,11 @@ class StickDiagramWindow(tk.Toplevel):
         self.gate_combo.current(0)
         self.gate_combo.pack(side=tk.LEFT, padx=5)
         self.gate_combo.bind("<<ComboboxSelected>>", lambda e: self.render_stick_diagram())
+
+        self.size_estimation_label = ttk.Label(
+            self, text="Size estimation: -- λ²", font=("Arial", 10, "bold")
+        )
+        self.size_estimation_label.pack(side=tk.TOP, fill=tk.X, padx=13, pady=(0, 4))
 
         self.allow_input_swapping_var = tk.BooleanVar(value=False)
         control_bar = ttk.Frame(self, padding=(8, 0, 8, 4))
@@ -757,6 +775,20 @@ class StickDiagramWindow(tk.Toplevel):
                 gate = _mirror_gate_stick_layout(gate)
             gate['output_left'] = output_left
             target_gates = [gate]
+
+        gate_estimates = [
+            (gate, estimate_gate_size_lambda(gate))
+            for gate in target_gates
+        ]
+        if sel_idx != 0:
+            _, estimate = gate_estimates[0]
+            estimation_text = (
+                f"Size estimation: {estimate['area']} λ² "
+                f"({estimate['width']} λ × {estimate['height']} λ)"
+            )
+            self.size_estimation_label.configure(
+                text=estimation_text, wraplength=1080
+            )
 
         c_metal = "#42a5f5"  # Metal-1 Blue
         c_metal2 = "#ab47bc"  # Metal-2 Purple
@@ -1021,6 +1053,11 @@ class StickDiagramWindow(tk.Toplevel):
                 underpass_end[0], underpass_end[1],
                 fill=c_metal, width=max(3, int(4 * self.zoom))
             )
+
+        under_gate_m1_wire_count = sum(
+            gate['gtype'] in ('XOR', 'XNOR')
+            for gate in target_gates
+        )
 
         gate_geometry_by_id = {
             geometry['gate']['node_id']: geometry
@@ -1312,6 +1349,11 @@ class StickDiagramWindow(tk.Toplevel):
             route['lane_y'] = lane_y
             track_intervals.setdefault(lane_y, []).append((route['x_min'], route['x_max']))
 
+        under_gate_m1_wire_count += sum(
+            route.get('lane_y', 0) > 400
+            for route in wire_routes
+        )
+
         direct_source_stems = set()
         routes_with_general_branches = {
             route['source_id']
@@ -1483,6 +1525,27 @@ class StickDiagramWindow(tk.Toplevel):
                     width=max(3, int(4 * self.zoom)), tags="metal2"
                 )
                 self.draw_contact_cut(source_x, lane_y)
+
+        if sel_idx == 0:
+            total_gate_height = sum(
+                estimate['height']
+                for _, estimate in gate_estimates
+            )
+            width = HORIZONTAL_STICK_LINE_COUNT * LAMBDA_PER_RULE_UNIT
+            total_height = (
+                total_gate_height
+                + under_gate_m1_wire_count * LAMBDA_PER_RULE_UNIT
+            )
+            total_area = width * total_height
+            self.size_estimation_label.configure(
+                text=(
+                    f"Size estimation: {width} λ × "
+                    f"({total_gate_height} λ + "
+                    f"{under_gate_m1_wire_count} M1 wires underneath × "
+                    f"{LAMBDA_PER_RULE_UNIT} λ) = {total_area} λ²"
+                ),
+                wraplength=1080
+            )
 
         c.tag_raise("metal2")
         c.tag_raise("contact_cut")
