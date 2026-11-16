@@ -1,3 +1,4 @@
+import math
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -617,6 +618,27 @@ class StickDiagramWindow(tk.Toplevel):
         self.allow_input_swapping_var = tk.BooleanVar(value=False)
         control_bar = ttk.Frame(self, padding=(8, 0, 8, 4))
         control_bar.pack(side=tk.TOP, fill=tk.X)
+        weight_controls = ttk.Frame(control_bar)
+        weight_controls.pack(side=tk.LEFT, padx=5)
+        self.gate_ordering_weight_vars = {}
+        weight_labels = {
+            'wire_length': "Wire length:",
+            'direct_connections': "Direct connections:",
+            'shared_diffusion': "Shared diffusion:"
+        }
+        for key, label in weight_labels.items():
+            ttk.Label(weight_controls, text=label).pack(side=tk.LEFT, padx=(4, 2))
+            weight_var = tk.StringVar(value=f"{GATE_ORDERING_WEIGHTS[key]:g}")
+            self.gate_ordering_weight_vars[key] = weight_var
+            weight_entry = ttk.Entry(
+                weight_controls, textvariable=weight_var, width=7
+            )
+            weight_entry.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(
+            weight_controls, text="Apply Weights",
+            command=self.apply_gate_ordering_weights
+        ).pack(side=tk.LEFT, padx=4)
+
         ttk.Checkbutton(
             control_bar,
             text="Optimize NAND/NOR input order",
@@ -653,6 +675,35 @@ class StickDiagramWindow(tk.Toplevel):
         self.canvas.bind("<B3-Motion>", self.do_pan)
         self.canvas.bind("<MouseWheel>", self.on_zoom_wheel)
 
+        self.render_stick_diagram()
+
+    def apply_gate_ordering_weights(self):
+        labels = {
+            'wire_length': "Wire length",
+            'direct_connections': "Direct connections",
+            'shared_diffusion': "Shared diffusion"
+        }
+        new_weights = {}
+        for key, variable in self.gate_ordering_weight_vars.items():
+            try:
+                weight = float(variable.get())
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Weight",
+                    f"{labels[key]} must be a non-negative number.",
+                    parent=self
+                )
+                return
+            if not math.isfinite(weight) or weight < 0:
+                messagebox.showerror(
+                    "Invalid Weight",
+                    f"{labels[key]} must be a finite, non-negative number.",
+                    parent=self
+                )
+                return
+            new_weights[key] = weight
+
+        GATE_ORDERING_WEIGHTS.update(new_weights)
         self.render_stick_diagram()
 
     def create_legend_badge(self, parent, text, color):
